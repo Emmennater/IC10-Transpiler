@@ -2,7 +2,7 @@
 import { EditorView, keymap, lineNumbers } from "@codemirror/view";
 import { javascript } from "@codemirror/lang-javascript";
 import { acceptCompletion } from "@codemirror/autocomplete";
-import { insertTab, indentLess, indentMore, history, historyKeymap } from "@codemirror/commands";
+import { insertTab, indentLess, indentMore, history, historyKeymap, toggleComment } from "@codemirror/commands";
 import { parser } from "./parser.js";
 import { LRLanguage, HighlightStyle, syntaxHighlighting, indentUnit } from "@codemirror/language";
 import { styleTags, tags as t, Tag } from "@lezer/highlight";
@@ -89,7 +89,10 @@ const lang = LRLanguage.define({
         Comment: t.comment,
       })
     ]
-  })
+  }),
+  languageData: {
+    commentTokens: { line: "#" },
+  }
 });
 
 const editor = new EditorView({
@@ -178,6 +181,10 @@ const editor = new EditorView({
 
           return false;
         }
+      },
+      {
+        key: "Mod-/",
+        run: toggleComment
       }
     ])
   ]
