@@ -34,8 +34,18 @@ const OP_INSTRUCTIONS = {
   "+": "add",
   "-": "sub",
   "*": "mul",
-  "/": "div"
+  "/": "div",
+  "==": "seq",
+  "!=": "sne",
+  "<=": "sle",
+  ">=": "sge",
+  "<": "slt",
+  ">": "sgt",
+  "&&": "and",
+  "||": "or"
 };
+
+const DEVICE_REGISTERS = new Set(["d0", "d1", "d2", "d3", "d4", "d5"]);
 
 class Cache {
   static TEMP = new Set(["r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8"]);
@@ -68,7 +78,7 @@ class Cache {
     return this.recentRegisters[this.recentRegisters.length - 1];
   }
 
-  get(variableName) {
+  get(variableName, discardValue = false) {
     let device = "db";
     let register = this.var2reg.get(variableName);
     let cacheInstructions = [];
@@ -106,12 +116,19 @@ class Cache {
     // Variable already in cache
     if (this.var2stack.has(variableName)) {
       let stackOffset = this.var2stack.get(variableName);
-      cacheInstructions.push(`get ${register} ${device} ${stackOffset}`);
+
+      if (!discardValue) {
+        cacheInstructions.push(`get ${register} ${device} ${stackOffset}`);
+      }
     }
 
     this.used(register);
 
     return { register, cacheInstructions };
+  }
+
+  has(variableName) {
+    return this.var2reg.has(variableName) || this.var2stack.has(variableName);
   }
 
   getTemp() {
@@ -136,8 +153,27 @@ export function transpile(ast) {
   let gen = "";
   let statements = ast.children;
   let cache = new Cache();
+  let nScopes = 0;
+  let nLoops = 0;
+  let nEndIfs = 0;
+  let nElseIfs = 0;
+  let devices = new Map(); // Device name -> device register
+  let unusedLoopEnds = new Set();
 
   // Helpers
+  function createRootScope() {
+    return {
+      index: nScopes++,
+      loopIndex: 0,
+    };
+  }
+
+  function createScope(scope) {
+    return {
+      ...scope,
+      index: nScopes++,
+    };
+  }
 
   function addInstruction(instruction) {
     gen += instruction + "\n";
@@ -146,6 +182,31 @@ export function transpile(ast) {
   function addInstructions(instructions) {
     for (let instruction of instructions) {
       addInstruction(instruction);
+    }
+  }
+
+  function reverseSign(numberString) {
+    if (numberString[0] === "-") {
+      return numberString.slice(1);
+    } else {
+      return "-" + numberString;
+    }
+  }
+
+  function applyUnaryOp(number, op) {
+    switch (op) {
+    case "-":
+      return { type: "Number", text: reverseSign(number) };
+    case "+":
+      return { type: "Number", text: number };
+    case "!":
+      if (number === "0") {
+        return { type: "Number", text: "1" };
+      } else {
+        return { type: "Number", text: "0" };
+      }
+    default:
+      throw new Error(`Unknown unary operator: ${op}`);
     }
   }
 
@@ -184,8 +245,78 @@ export function transpile(ast) {
     return { type: "Register", text: outRegister };
   }
 
+  function unaryOp(expr, outRegister) {
+    let op = expr.children[0];
+    let operand = expr.children[1];
+
+    // Compute right expression if needed
+    if (operand.type !== "Number" && operand.type !== "Register") {
+      operand = processExpression(operand);
+    }
+
+    // If right was a temporary register, free it
+    free(operand);
+
+    // Compute expression
+    if (operand.type === "Number") {
+      let value = applyUnaryOp(operand.text, op.text);
+
+      if (outRegister !== "none") {
+        addInstruction(`move ${outRegister} ${value.text}`);
+      }
+
+      return value;
+    }
+
+    if (outRegister === "none") outRegister = cache.getTemp();
+
+    // Add instructions to compute expression
+    switch (op.text) {
+    case "-":
+      addInstruction(`mul ${outRegister} -1 ${operand.text}`);
+      break;
+    case "+":
+      addInstruction(`move ${outRegister} ${operand.text}`);
+      break;
+    case "!":
+      addInstuction(`seq ${outRegister} ${operand.text} 0`);
+      break;
+    default:
+      throw new Error(`Unknown unary operator: ${op.text}`);
+    }
+
+    return { type: "Register", text: outRegister };
+  }
+
   function property(expr, outRegister) {
     const variableName = expr.children[0].text;
+    const isDeviceRef = devices.has(variableName);
+    const isDeviceVar = DEVICE_REGISTERS.has(variableName);
+
+    if (isDeviceRef || isDeviceVar) {
+      let device = isDeviceRef ? devices.get(variableName) : variableName;
+
+      if (expr.children.length === 1) {
+        throw "Expected property accessor";
+      }
+
+      if (expr.children[2].children.length !== 1) {
+        throw "Expected only one property accessor";
+      }
+
+      const attribute = expr.children[2].children[0];
+      
+      if (attribute.type !== "VariableName") {
+        throw "Expected attribute to be a variable name";
+      }
+      
+      if (outRegister === "none") outRegister = cache.getTemp();
+
+      addInstruction(`l ${outRegister} ${device} ${attribute.text}`);
+
+      return { type: "Register", text: outRegister };
+    }
+    
     const { register, cacheInstructions } = cache.get(variableName, outRegister);
 
     addInstructions(cacheInstructions);
@@ -224,7 +355,7 @@ export function transpile(ast) {
     }
 
     if (expr.type === "Bool") {
-      return number(expr, outRegister);
+      return bool(expr, outRegister);
     }
 
     if (expr.type === "Property") {
@@ -238,6 +369,12 @@ export function transpile(ast) {
     if (expr.type === "BinaryOp") {
       return binaryOp(expr, outRegister);
     }
+
+    if (expr.type === "UnaryOp") {
+      return unaryOp(expr, outRegister);
+    }
+
+    throw `Unknown expression type: ${expr.type}`;
   }
 
   // Statements
@@ -254,33 +391,176 @@ export function transpile(ast) {
   }
 
   function assignment(statement) {
-    const target = processExpression(statement.children[0]);
-    const value = processExpression(statement.children[2], target.text);
+    let target = statement.children[0];
 
-    free(target); // Just in case the target happened to be a temporary register
-    free(value);
+    // Setting lone variables
+    if (target.children.length === 1) {
+      if (target.children[0].type !== "VariableName") {
+        throw "Expected assignment target to be a variable name";
+      }
+
+      let variableName = target.children[0].text;
+      let { register, cacheInstructions } = cache.get(variableName, true);
+
+      addInstructions(cacheInstructions);
+      processExpression(statement.children[2], register);
+
+      return { type: "Register", text: register };
+    }
+    
+    // Setting device attributes
+    if (target.children.length === 3) {
+      let variable = target.children[0];
+      let device = variable.text;
+
+      if (variable.type === "VariableName") {
+        device = devices.get(device);
+        
+        if (device === undefined) {
+          throw "Expected assignment target to be a device property";
+        }
+      } else if (variable.type !== "Device") {
+        throw "Expected assignment target to be a device";
+      }
+
+      if (target.children[2].children.length !== 1) {
+        throw "Expected only one property accessor";
+      }
+
+      if (target.children[2].children[0].type !== "VariableName") {
+        throw "Expected property accessor to be a variable name";
+      }
+
+      let attributeName = target.children[2].children[0].text;
+      let value = processExpression(statement.children[2]);
+
+      free(value);
+      addInstruction(`s ${device} ${attributeName} ${value.text}`);
+    }
   }
 
-  function processStatement(statement) {
+  function loopExpr(statement, scope) {
+    const statements = statement.children.slice(1, statement.children.length - 1);
+    const nextScope = createScope(scope);
+
+    nextScope.loopIndex = nextScope.index;
+    unusedLoopEnds.add(nextScope.index);
+
+    addInstruction(`scope${nextScope.index}:`);
+    processStatements(statements, nextScope);
+    addInstruction(`j scope${nextScope.index}`);
+    addInstruction(`end${nextScope.index}:`);
+  }
+
+  function ifExpr(statement, scope) {
+    let ifStatement = statement.children[0];
+    let elseIfStatements = [];
+    let elseStatement = null;
+
+    if (statement.children[statement.children.length - 2].type === "Else") {
+      elseStatement = statement.children[statement.children.length - 2];
+      elseIfStatements = statement.children.slice(1, statement.children.length - 2);
+    } else {
+      elseIfStatements = statement.children.slice(1, statement.children.length - 1);
+    }
+
+    nEndIfs += 1;
+
+    let currentScope = createScope(scope);
+    currentScope.endif = currentScope.index;
+    let nextScope = null;
+
+    for (let i = 0; i < statement.children.length; i++) {
+      let childStatement = statement.children[i];
+
+      if (childStatement.type === "Else") {
+        processStatements(childStatement.children.slice(1), currentScope);
+        addInstruction(`end${currentScope.endif}:`);
+        break;
+      }
+
+      let nextLabel = `end${currentScope.endif}`;
+
+      if (statement.children[i + 1].type !== "end") {
+        nextScope = createScope(currentScope);
+        nextLabel = `scope${nextScope.index}`;
+      }
+
+      // If/ElseIf clause
+      let condition = processExpression(childStatement.children[1]);
+      
+      // Free temporary registers used for condition
+      free(condition);
+
+      addInstruction(`beq ${condition.text} 0 ${nextLabel}`);
+      processStatements(childStatement.children.slice(3), currentScope);
+      
+      if (statement.children[i + 1].type === "end") {
+        // End of the if/elif/else statement
+        addInstruction(`end${currentScope.endif}:`);
+        break;
+      } else {
+        addInstruction(`j end${currentScope.endif}`);
+        addInstruction(`scope${nextScope.index}:`);
+        currentScope = nextScope;
+      }
+    }
+  }
+
+  function deviceDeclaration(statement) {
+    const variableName = statement.children[1].text;
+    const deviceRegister = statement.children[3].text;
+    devices.set(variableName, deviceRegister);
+  }
+
+  function processStatement(statement, scope) {
     if (statement.type === "Declaration") {
       return declaration(statement);
+    }
+
+    if (statement.type === "DeviceDeclaration") {
+      return deviceDeclaration(statement);
     }
 
     if (statement.type === "Assignment") {
       return assignment(statement);
     }
 
+    if (statement.type === "LoopExpr") {
+      return loopExpr(statement, scope);
+    }
+
+    if (statement.type === "IfExpr") {
+      return ifExpr(statement, scope);
+    }
+
+    if (statement.type === "continue") {
+      addInstruction("j scope" + scope.loopIndex);
+      return;
+    }
+
+    if (statement.type === "break") {
+      addInstruction("j end" + scope.loopIndex);
+      unusedLoopEnds.delete(scope.loopIndex);
+      return;
+    }
+
     // Not found: add raw instructions
-    gen += statement.text;
+    gen += statement.text + "\n";
   }
 
-  function processStatements(statements) {
+  function processStatements(statements, scope) {
     for (let statement of statements) {
-      processStatement(statement);
+      processStatement(statement, scope);
     }
   }
 
-  processStatements(statements);
+  processStatements(statements, createRootScope());
+
+  // Remove unused end loops
+  for (let index of unusedLoopEnds) {
+    gen = gen.replace(`end${index}:\n`, "");
+  }
 
   return gen.trim();
 }

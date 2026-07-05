@@ -1,4 +1,4 @@
-@precedence { times @left, plus @left, comp @left, and @left, or @left }
+@precedence { neg, times @left, plus @left, comp @left, and @left, or @left }
 
 kw<term> { @specialize<identifier, term> }
 kwn<term> { @specialize[@name={term}]<identifier, term> }
@@ -36,10 +36,12 @@ LabelName { identifier }
 Label { LabelName Colon }
 
 expression {
-  Property | Number | BinaryOp | String | Parens | FunctionCall | Bool
+  Property | Number | UnaryOp | BinaryOp | String | Parens | FunctionCall | Bool
 }
 
 Parens { ParenLeft expression ParenRight }
+
+UnaryOp { !neg (AddOp | Negate) expression }
 
 BinaryOp {
   expression !times MulOp expression |
@@ -73,6 +75,7 @@ Property { (VariableName | Register | Device) (Dot Property)? }
   identifier { $[a-zA-Z_] $[a-zA-Z0-9_]* }
   space { $[\t \r]+ }
   Number { @digit+ ("." | "." @digit+)? }
+  Negate { "!" }
   MulOp { "*" | "/" }
   AddOp { "+" | "-" }
   CompareOp { "==" | "!=" | "<=" | ">=" | "<" | ">" }

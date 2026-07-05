@@ -32,7 +32,6 @@ html, body {
   padding: 4px 14px;
     background: var(--cyan-dimmer);
   border-bottom: solid 2px var(--cyan-dim);
-  color: var(--cyan);
   user-select: none;
 }
 
@@ -41,15 +40,28 @@ html, body {
   font-size: 30px;
   font-family: "JetBrains Mono", monospace;
   padding: 0px 0px;
+  color: var(--cyan);
+  text-shadow:
+    0.25px 0.5px 0px #41464e,
+    0.5px 1px 0px #41464e,
+    1px 1.5px 0px #41464e,
+    1.5px 2px 0px #41464e,
+    2px 2.5px 0px #41464e;
 }
 
 .title .start {
   font-weight: bold;
   color: #d2a8ff;
+  text-shadow:
+    1px 1.5px 0px #4d3e5d,
+    2px 2.5px 0px #4d3e5d;
 }
 
 .title .mid {
   color: #ff7b72;
+  text-shadow:
+    1px 1.5px 0px #733d39,
+    2px 2.5px 0px #733d39;
 }
 
 button {

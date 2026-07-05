@@ -14,8 +14,8 @@ import { runTests } from "./tests.js";
 import { getAST } from "./helper.js";
 
 // const starterCode = `
-// let machine = d0
-// let stacker = d1
+// device machine = d0
+// device stacker = d1
 
 // machine.ClearMemory = 1
 
@@ -33,9 +33,20 @@ import { getAST } from "./helper.js";
 // `.substring(1);
 
 const starterCode = `
-let x = 0
-let y = 0
-y = x + 3`.substring(1);
+device machine = d0
+device stacker = d1
+
+machine.ClearMemory = 1
+
+loop
+  yield
+  if machine.ExportCount == stacker.Setting then
+    machine.Activate = 0
+    machine.ClearMemory = 1
+  elif machine.Activate == 0 then
+    machine.ClearMemory = 1
+  end
+end`.substring(1);
 
 const device = Tag.define();
 const register = Tag.define();
@@ -93,7 +104,7 @@ const myCustomTheme = EditorView.theme({
   },
   // Caret color
   "&.cm-focused .cm-cursor": {
-    borderLeft: "2px solid #7e8797"
+    borderLeft: "2px solid #959fb0"
   },
   // Selection color (focused)
   "&.cm-focused .cm-scroller > .cm-selectionLayer > .cm-selectionBackground": {
@@ -336,6 +347,6 @@ function run() {
 
 document.getElementById("run").addEventListener("click", run);
 
-// run();
-
 runTests(parser);
+
+// run();
