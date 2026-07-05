@@ -182,6 +182,29 @@ beq 1 0 end2
 j scope1
 end2:
 j scope1
+
+# Batch operations
+StructurePipeAnalyzer.Setting = 1
+let x = Average(StructurePipeAnalyzer.Pressure)
+
+sb HASH("StructurePipeAnalyzer") Setting 1
+lb r10 HASH("StructurePipeAnalyzer") Pressure Average
+
+# Batch name operations
+StructurePipeAnalyzer.pipe0.Setting = 1
+let x = Average(StructurePipeAnalyzer.pipe0.Pressure)
+
+sbn HASH("StructurePipeAnalyzer") HASH("pipe0") Setting 1
+lbn r10 HASH("StructurePipeAnalyzer") HASH("pipe0") Pressure Average
+
+# Definitions
+define analyzer StructurePipeAnalyzer
+analyzer.pipe0.Setting = 1
+let x = Average(analyzer.pipe0.Pressure)
+
+define analyzer HASH("StructurePipeAnalyzer")
+sbn analyzer HASH("pipe0") Setting 1
+lbn r10 analyzer HASH("pipe0") Pressure Average
 `;
 
 function format(char) {

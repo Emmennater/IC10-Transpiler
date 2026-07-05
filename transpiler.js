@@ -159,6 +159,7 @@ export function transpile(ast) {
   let nElseIfs = 0;
   let devices = new Map(); // Device name -> device register
   let unusedLoopEnds = new Set();
+  let defined = new Map();
 
   // Helpers
   function createRootScope() {
@@ -173,6 +174,10 @@ export function transpile(ast) {
       ...scope,
       index: nScopes++,
     };
+  }
+
+  function prependInstruction(instruction) {
+    gen = instruction + "\n" + gen;
   }
 
   function addInstruction(instruction) {
@@ -208,6 +213,43 @@ export function transpile(ast) {
     default:
       throw new Error(`Unknown unary operator: ${op}`);
     }
+  }
+
+  function collapseProperty(expr) {
+    let identifiers = [];
+    let idx = 0;
+
+    while (true) {
+      let identifier = expr.children[0];
+
+      if (idx == 0) {
+        if (identifier.type !== "VariableName" && identifier.type !== "Device") {
+          throw "Expected identifier or device for property accessor";
+        }
+      } else {
+        if (identifier.type !== "VariableName") {
+          throw "Expected identifier for property accessor";
+        }
+      }
+
+      identifiers.push({
+        type: identifier.type,
+        text: identifier.text
+      });
+      
+      if (expr.children.length === 1) break;
+      
+      expr = expr.children[2];
+
+      idx++;
+    }
+
+    return identifiers;
+  }
+
+  function makeDefinition(variableName, value) {
+    prependInstruction(`define ${variableName} ${value}`);
+    defined.set(variableName, value);
   }
 
   // Expressions
@@ -317,6 +359,14 @@ export function transpile(ast) {
       return { type: "Register", text: outRegister };
     }
     
+    if (!cache.has(variableName)) {
+      if (outRegister !== "none") {
+        addInstruction(`move ${outRegister} ${variableName}`);
+      }
+
+      return { type: "Identifier", text: variableName };
+    }
+
     const { register, cacheInstructions } = cache.get(variableName, outRegister);
 
     addInstructions(cacheInstructions);
@@ -349,6 +399,50 @@ export function transpile(ast) {
     return value;
   }
 
+  function functionCall(expr, outRegister) {
+    const functionName = expr.children[0].text;
+
+    if (outRegister === "none") outRegister = cache.getTemp();
+    
+    if (functionName === "HASH") {  
+      addInstruction(`move ${outRegister} ${expr.text}`);
+      
+      return { type: "Register", text: outRegister };
+    }
+
+    // Check for valid batch mode
+    const batchModes = new Set(["Average", "Sum", "Minimum", "Maximum"]);
+
+    if (!batchModes.has(functionName)) {
+      throw "Invalid batch mode";
+    }
+
+    // Check if this is a batch operation
+    const argument = expr.children[1].children[1];
+    const idfs = collapseProperty(argument);
+
+    let x0 = idfs[0].text;
+    let x1 = idfs[1].text;
+
+    if (!defined.has(x0)) {
+      x0 = `HASH("${x0}")`;
+    }
+
+    if (idfs.length == 2) {
+      addInstruction(`lb ${outRegister} ${x0} ${x1} ${functionName}`);
+    } else if (idfs.length == 3) {
+      let x2 = idfs[2].text;
+
+      if (!defined.has(x1)) {
+        x1 = `HASH("${x1}")`;
+      }
+
+      addInstruction(`lbn ${outRegister} ${x0} ${x1} ${x2} ${functionName}`);
+    }
+
+    return { type: "Register", text: outRegister };
+  }
+
   function processExpression(expr, outRegister = "none") {
     if (expr.type === "Number") {
       return number(expr, outRegister);
@@ -374,6 +468,10 @@ export function transpile(ast) {
       return unaryOp(expr, outRegister);
     }
 
+    if (expr.type === "FunctionCall") {
+      return functionCall(expr, outRegister);
+    }
+
     throw `Unknown expression type: ${expr.type}`;
   }
 
@@ -381,6 +479,16 @@ export function transpile(ast) {
 
   function declaration(statement) {
     const variableName = statement.children[1].text;
+
+    // Declaring a variable only
+    if (statement.children.length === 2) {
+      const { register, cacheInstructions } = cache.get(variableName, true);
+
+      addInstructions(cacheInstructions);
+
+      return;
+    }
+
     const { register, cacheInstructions } = cache.get(variableName);
     
     addInstructions(cacheInstructions);
@@ -391,15 +499,16 @@ export function transpile(ast) {
   }
 
   function assignment(statement) {
-    let target = statement.children[0];
+    const target = statement.children[0];
+    const idfs = collapseProperty(target);
 
     // Setting lone variables
-    if (target.children.length === 1) {
-      if (target.children[0].type !== "VariableName") {
+    if (idfs.length === 1) {
+      if (idfs[0].type !== "VariableName") {
         throw "Expected assignment target to be a variable name";
       }
 
-      let variableName = target.children[0].text;
+      let variableName = idfs[0].text;
       let { register, cacheInstructions } = cache.get(variableName, true);
 
       addInstructions(cacheInstructions);
@@ -409,33 +518,47 @@ export function transpile(ast) {
     }
     
     // Setting device attributes
-    if (target.children.length === 3) {
-      let variable = target.children[0];
-      let device = variable.text;
+    let device = idfs[0];
 
-      if (variable.type === "VariableName") {
-        device = devices.get(device);
-        
-        if (device === undefined) {
-          throw "Expected assignment target to be a device property";
-        }
-      } else if (variable.type !== "Device") {
-        throw "Expected assignment target to be a device";
-      }
+    // Load device register if it is defined
+    if (devices.has(device.text)) {
+      device = { type: "Device", text: devices.get(device.text) };
+    }
 
-      if (target.children[2].children.length !== 1) {
+    if (device.type === "Device") {
+      if (idfs.length !== 2) {
         throw "Expected only one property accessor";
       }
 
-      if (target.children[2].children[0].type !== "VariableName") {
-        throw "Expected property accessor to be a variable name";
-      }
-
-      let attributeName = target.children[2].children[0].text;
+      // Setting a device attribute
+      let attributeName = idfs[1].text;
       let value = processExpression(statement.children[2]);
 
       free(value);
-      addInstruction(`s ${device} ${attributeName} ${value.text}`);
+      addInstruction(`s ${device.text} ${attributeName} ${value.text}`);
+    } else {
+      // Batch setting device attributes
+      let value = processExpression(statement.children[2]);
+      let x0 = idfs[0].text;
+      let x1 = idfs[1].text;
+
+      free(value);
+
+      if (!defined.has(x0)) {
+        x0 = `HASH("${x0}")`;
+      }
+
+      if (idfs.length === 2) {
+        addInstruction(`sb ${x0} ${x1} ${value.text}`);
+      } else if (idfs.length === 3) {
+        let x2 = idfs[2].text;
+
+        if (!defined.has(x1)) {
+          x1 = `HASH("${x1}")`;
+        }
+
+        addInstruction(`sbn ${x0} ${x1} ${x2} ${value.text}`);
+      }
     }
   }
 
@@ -513,6 +636,13 @@ export function transpile(ast) {
     devices.set(variableName, deviceRegister);
   }
 
+  function definition(statement) {
+    const variableName = statement.children[1].text;
+    const value = statement.children[2].text;
+    addInstruction(`define ${variableName} HASH("${value}")`);
+    defined.set(variableName, value);
+  }
+
   function processStatement(statement, scope) {
     if (statement.type === "Declaration") {
       return declaration(statement);
@@ -545,8 +675,25 @@ export function transpile(ast) {
       return;
     }
 
+    if (statement.type === "Definition") {
+      return definition(statement);
+    }
+
     // Not found: add raw instructions
-    gen += statement.text + "\n";
+    let instruction = [];
+
+    for (let child of statement.children) {
+      if (child.type === "Property" && cache.has(child.text)) {
+        // Replace property with register
+        let { register, cacheInstructions } = cache.get(child.text, true);
+        addInstructions(cacheInstructions);
+        instruction.push(register);
+      } else {
+        instruction.push(child.text);
+      }
+    }
+
+    addInstruction(instruction.join(" "));
   }
 
   function processStatements(statements, scope) {

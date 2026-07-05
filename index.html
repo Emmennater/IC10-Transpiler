@@ -7,18 +7,31 @@
   <link rel="stylesheet" href="main.css">
 </head>
 <body>
-  <vbox class="main">
-    <hbox>
-      <div class="header">
-        <span class="title">
-          <span class="start">IC10</span> //
-          <span class="mid">Transpiler</span> //
-          <span class="end">v1.0</span>
-        </span>
-        <button id="run">Run</button>
-      </div>
-    </hbox>
-    <div id="editor-container"></div>
+  <hbox class="main">
+    <vbox class="panel">
+      <hbox>
+        <div class="header">
+          <span class="title">
+            <span class="start">IC10</span> //
+            <span class="mid">Transpiler</span> //
+            <span class="end">v1.0</span>
+          </span>
+          <button id="run">Run</button>
+        </div>
+      </hbox>
+      <div id="editor-container" class="text-editor"></div>
+    </vbox>
+    <vbox class="panel right">
+      <hbox>
+        <div class="header">
+          <span class="title">
+            Output
+          </span>
+          <button id="copy">Copy</button>
+        </div>
+      </hbox>
+      <div id="output-container" class="text-editor"></div>
+    </vbox>
   </vbox>
   <script type="module" src="main.js"></script>
 </body>

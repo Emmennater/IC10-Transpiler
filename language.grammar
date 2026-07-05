@@ -1,4 +1,4 @@
-@precedence { neg, times @left, plus @left, comp @left, and @left, or @left }
+@precedence { call, neg, times @left, plus @left, comp @left, and @left, or @left }
 
 kw<term> { @specialize<identifier, term> }
 kwn<term> { @specialize[@name={term}]<identifier, term> }
@@ -9,7 +9,7 @@ block { newline* ((statement (newline+ statement)*) newline*)? }
 
 statement {
   Instruction | IfExpr | WhileExpr | LoopExpr | Declaration | DeviceDeclaration |
-  Assignment | Label | kwn<"break"> | kwn<"continue">
+  Definition | Assignment | Label | kwn<"break"> | kwn<"continue">
 }
 
 Instruction { InstructionName expression* }
@@ -25,9 +25,11 @@ LoopExpr { kwn<"loop"> newline block kwn<"end"> }
 
 VariableName { identifier }
 
-Declaration { @specialize[@name="let"]<identifier, "let"> VariableName Assign expression }
+Declaration { @specialize[@name="let"]<identifier, "let"> VariableName (Assign expression)? }
 
 DeviceDeclaration { @specialize[@name="device"]<identifier, "device"> VariableName Assign Device }
+
+Definition { @specialize[@name="define"]<identifier, "define"> VariableName expression }
 
 Assignment { Property Assign expression }
 
@@ -51,13 +53,11 @@ BinaryOp {
   expression !or LogicOr expression
 }
 
-FunctionCall { FunctionName Parens }
-
-FunctionName { kw<"HASH"> }
+FunctionCall { VariableName !call Parens }
 
 InstructionName { identifier }
 
-Device { kw<"d0"> | kw<"d1"> | kw<"d2"> | kw<"d3"> | kw<"d4"> | kw<"d5"> }
+Device { kw<"d0"> | kw<"d1"> | kw<"d2"> | kw<"d3"> | kw<"d4"> | kw<"d5"> | kw<"db"> }
 
 Register {
   kw<"r0"> | kw<"r1"> | kw<"r2"> | kw<"r3"> | kw<"r4"> | kw<"r5"> | kw<"r6"> | kw<"r7"> |

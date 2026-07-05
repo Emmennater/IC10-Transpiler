@@ -3,6 +3,7 @@ import {
   EditorView, keymap, lineNumbers, drawSelection, highlightActiveLineGutter,
   highlightActiveLine
 } from "@codemirror/view";
+import { EditorState } from "@codemirror/state";
 import { javascript } from "@codemirror/lang-javascript";
 import { acceptCompletion } from "@codemirror/autocomplete";
 import { insertTab, indentLess, indentMore, history, historyKeymap, toggleComment } from "@codemirror/commands";
@@ -12,25 +13,6 @@ import { parser } from "./parser.js";
 import { transpile } from "./transpiler.js";
 import { runTests } from "./tests.js";
 import { getAST } from "./helper.js";
-
-// const starterCode = `
-// device machine = d0
-// device stacker = d1
-
-// machine.ClearMemory = 1
-
-// loop
-//   yield
-//   if machine.ExportCount == stacker.Setting then
-//     machine.Activate = 0
-//     machine.ClearMemory = 1
-//     continue
-//   elif machine.Activate == 0 then
-//     machine.ClearMemory = 1
-//     break
-//   end
-// end
-// `.substring(1);
 
 const starterCode = `
 device machine = d0
@@ -43,10 +25,13 @@ loop
   if machine.ExportCount == stacker.Setting then
     machine.Activate = 0
     machine.ClearMemory = 1
+    continue
   elif machine.Activate == 0 then
     machine.ClearMemory = 1
+    break
   end
-end`.substring(1);
+end
+`.substring(1);
 
 const device = Tag.define();
 const register = Tag.define();
@@ -148,7 +133,7 @@ const lang = LRLanguage.define({
         Number: t.number,
         "AddOp MulOp CompareOp LogicAnd LogicOr ParenLeft ParenRight Assign Dot Colon": t.operator,
         "InstructionName FunctionName": t.function(t.variableName),
-        "if then elif else end let while do loop break continue device": t.keyword,
+        "if then elif else end let while do loop break continue device define": t.keyword,
         String: t.string,
         Device: device,
         Register: register,
@@ -164,155 +149,185 @@ const lang = LRLanguage.define({
   }
 });
 
+const myCustomExtensions = [
+  myCustomThemeExtension,
+  lang,
+  lineNumbers(),
+  drawSelection(),
+  highlightActiveLineGutter(),
+  highlightActiveLine(),
+  history(),
+  indentUnit.of("  "),
+  keymap.of([
+    ...historyKeymap,
+    {
+      key: "Tab",
+      run(view) {
+        if (acceptCompletion(view))
+          return true;
+
+        let { state, dispatch } = view;
+
+        // keep normal multi-line/selection indent behavior
+        if (state.selection.ranges.some(r => !r.empty)) {
+          return indentMore({ state, dispatch })
+        }
+
+        let { from, to } = state.selection.main;
+        let column = from - state.doc.lineAt(from).from;
+
+        if (column % 2 == 0) {
+          dispatch(state.replaceSelection("  "));
+        } else {
+          dispatch(state.replaceSelection(" "));
+        }
+
+        return true;
+      }
+    },
+    {
+      key: "Shift-Tab",
+      run: indentLess
+    },
+    {
+      key: "Enter",
+      run(view) {
+        const { state } = view;
+        const { from } = state.selection.main;
+
+        const line = state.doc.lineAt(from);
+        const beforeCursor = line.text.slice(0, from - line.from);
+
+        // Copy the current line's indentation
+        let indent = (line.text.match(/^\s*/) ?? [""])[0];
+
+        // If the line ends with "then", "do", or "else", indent one more level
+        if (/\b(?:then|do|else)\s*$/.test(beforeCursor)) {
+          indent += "  ";
+        }
+
+        view.dispatch({
+          changes: {
+            from,
+            to: from,
+            insert: "\n" + indent
+          },
+          selection: {
+            anchor: from + 1 + indent.length
+          },
+          scrollIntoView: true
+        });
+
+        return true;
+      }
+    },
+    {
+      key: "Backspace",
+      run(view) {
+        const { state } = view;
+        const { from, to, empty } = state.selection.main;
+
+        // Let the default behavior handle selections
+        if (!empty) return false;
+
+        // If on an odd column only delete one
+        let column = from - state.doc.lineAt(from).from;
+        if (column % 2 === 1) return false;
+
+        if (from >= 2 && state.doc.sliceString(from - 2, from) === "  ") {
+          view.dispatch({
+            changes: {
+              from: from - 2,
+              to: from
+            }
+          });
+          return true;
+        }
+
+        return false;
+      }
+    },
+    {
+      key: "Mod-/",
+      run: toggleComment
+    }
+  ]),
+  EditorView.updateListener.of(update => {
+    // Ignore cursor movements made with the mouse
+    if (update.transactions.some(tr => tr.isUserEvent("select.pointer"))) {
+      return;
+    }
+
+    const view = update.view;
+    const margin = 3 * view.defaultLineHeight;
+
+    const pos = update.state.selection.main.head;
+    const coords = view.coordsAtPos(pos);
+    if (!coords) return;
+
+    const scroller = view.scrollDOM;
+    const rect = scroller.getBoundingClientRect();
+
+    if (coords.top < rect.top + margin) {
+      scroller.scrollTop -= (rect.top + margin) - coords.top;
+    }
+
+    if (coords.bottom > rect.bottom - margin) {
+      scroller.scrollTop += coords.bottom - (rect.bottom - margin);
+    }
+  }),
+  EditorView.updateListener.of(update => {
+    const view = update.view;
+
+    const hasSelection = !view.state.selection.main.empty;
+    const isFocused = view.hasFocus;
+
+    const hideActiveLine = hasSelection || !isFocused;
+
+    view.dom.classList.toggle("cm-hide-active-line", hideActiveLine);
+  })
+];
+
+const nonEditable = [
+  EditorState.readOnly.of(true),
+  EditorView.contentAttributes.of({tabindex: "0"})
+];
+
 const editor = new EditorView({
   parent: document.getElementById("editor-container"),
   doc: starterCode,
-  extensions: [
-    myCustomThemeExtension,
-    lang,
-    lineNumbers(),
-    drawSelection(),
-    highlightActiveLineGutter(),
-    highlightActiveLine(),
-    history(),
-    indentUnit.of("  "),
-    keymap.of([
-      ...historyKeymap,
-      {
-        key: "Tab",
-        run(view) {
-          if (acceptCompletion(view))
-            return true;
-
-          let { state, dispatch } = view;
-
-          // keep normal multi-line/selection indent behavior
-          if (state.selection.ranges.some(r => !r.empty)) {
-            return indentMore({ state, dispatch })
-          }
-
-          let { from, to } = state.selection.main;
-          let column = from - state.doc.lineAt(from).from;
-
-          if (column % 2 == 0) {
-            dispatch(state.replaceSelection("  "));
-          } else {
-            dispatch(state.replaceSelection(" "));
-          }
-
-          return true;
-        }
-      },
-      {
-        key: "Shift-Tab",
-        run: indentLess
-      },
-      {
-        key: "Enter",
-        run(view) {
-          const { state } = view;
-          const { from } = state.selection.main;
-
-          const line = state.doc.lineAt(from);
-          const beforeCursor = line.text.slice(0, from - line.from);
-
-          // Copy the current line's indentation
-          let indent = (line.text.match(/^\s*/) ?? [""])[0];
-
-          // If the line ends with "then", "do", or "else", indent one more level
-          if (/\b(?:then|do|else)\s*$/.test(beforeCursor)) {
-            indent += "  ";
-          }
-
-          view.dispatch({
-            changes: {
-              from,
-              to: from,
-              insert: "\n" + indent
-            },
-            selection: {
-              anchor: from + 1 + indent.length
-            },
-            scrollIntoView: true
-          });
-
-          return true;
-        }
-      },
-      {
-        key: "Backspace",
-        run(view) {
-          const { state } = view;
-          const { from, to, empty } = state.selection.main;
-
-          // Let the default behavior handle selections
-          if (!empty) return false;
-
-          // If on an odd column only delete one
-          let column = from - state.doc.lineAt(from).from;
-          if (column % 2 === 1) return false;
-
-          if (from >= 2 && state.doc.sliceString(from - 2, from) === "  ") {
-            view.dispatch({
-              changes: {
-                from: from - 2,
-                to: from
-              }
-            });
-            return true;
-          }
-
-          return false;
-        }
-      },
-      {
-        key: "Mod-/",
-        run: toggleComment
-      }
-    ]),
-    EditorView.updateListener.of(update => {
-      const view = update.view;
-
-      const margin = 5 * view.defaultLineHeight;
-
-      const pos = update.state.selection.main.head;
-      const coords = view.coordsAtPos(pos);
-      if (!coords) return;
-
-      const scroller = update.view.scrollDOM;
-      const rect = scroller.getBoundingClientRect();
-
-      if (coords.top < rect.top + margin) {
-        scroller.scrollTop -= (rect.top + margin) - coords.top;
-      }
-
-      if (coords.bottom > rect.bottom - margin) {
-        scroller.scrollTop += coords.bottom - (rect.bottom - margin);
-      }
-    }),
-    EditorView.updateListener.of(update => {
-      const view = update.view;
-
-      const hasSelection = !view.state.selection.main.empty;
-      const isFocused = view.hasFocus;
-
-      const hideActiveLine = hasSelection || !isFocused;
-
-      view.dom.classList.toggle("cm-hide-active-line", hideActiveLine);
-    })
-  ]
+  extensions: myCustomExtensions
 });
 
-const scroller = editor.scrollDOM;
+const output = new EditorView({
+  parent: document.getElementById("output-container"),
+  doc: "",
+  extensions: [...nonEditable, ...myCustomExtensions]
+});
 
-const resize = new ResizeObserver(() => {
-  scroller.style.setProperty(
+// Editor scrolling
+const scrollerEditor = editor.scrollDOM;
+
+const resizeEditor = new ResizeObserver(() => {
+  scrollerEditor.style.setProperty(
     "--scroll-padding",
-    `${scroller.clientHeight - editor.defaultLineHeight}px`
+    `${scrollerEditor.clientHeight - editor.defaultLineHeight}px`
   );
 });
 
-resize.observe(scroller);
+resizeEditor.observe(scrollerEditor);
+
+// Output scrolling
+const scrollerOutput = output.scrollDOM;
+
+const resizeOutput = new ResizeObserver(() => {
+  scrollerOutput.style.setProperty(
+    "--scroll-padding",
+    `${scrollerOutput.clientHeight - output.defaultLineHeight}px`
+  );
+});
+
+resizeOutput.observe(scrollerOutput);
 
 function showTree(tree, text) {
   const getLineNum = pos => {
@@ -342,11 +357,23 @@ function run() {
   const text = editor.state.doc.toString();
   const ast = getAST(text);
   const ic10 = transpile(ast);
-  console.log(ic10);
+  
+  output.dispatch({
+    changes: {
+      from: 0,
+      to: output.state.doc.length,
+      insert: ic10
+    }
+  });
 }
 
 document.getElementById("run").addEventListener("click", run);
 
-runTests(parser);
+document.getElementById("copy").addEventListener("click", () => {
+  const text = output.state.doc.toString();
+  navigator.clipboard.writeText(text);
+})
 
-// run();
+// runTests(parser);
+
+run();
