@@ -1,5 +1,5 @@
 {
-  "name": "IC10 Transpiler",
+  "name": "IC10 Compiler",
   "version": "1.0.0",
   "description": "",
   "main": "index.js",
@@ -13,7 +13,7 @@
   "author": "",
   "license": "ISC",
   "type": "commonjs",
-  "homepage": "https://emmennater.github.io/IC10-Transpiler",
+  "homepage": "https://emmennater.github.io/IC10-Compiler",
   "dependencies": {
     "@codemirror/autocomplete": "^6.20.3",
     "@codemirror/commands": "^6.10.4",
