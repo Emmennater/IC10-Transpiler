@@ -14,6 +14,11 @@ add r11 r0 r1
 add r0 2 2
 add r12 r0 1
 
+# Positive and negative values
+let x = +1 - -1
+
+sub r10 1 -1
+
 # Using the stack
 let a = 1
 let b = 2
@@ -211,7 +216,7 @@ lbn r10 analyzer HASH("pipe0") Pressure Average
 # Register and device backwards compatibility
 device larre = d0
 let x
-ls x larre 255 damage
+ls(x, larre, 255, damage)
 
 alias larre d0
 ls r10 larre 255 damage
@@ -224,6 +229,32 @@ let x = loadSlot(larre, slot, "damage")
 alias larre d0
 define slot 255
 ls r10 larre slot damage
+
+# Set slot function and string definitions
+define iron = ItemIronIngot
+define type = "PrefabHash"
+setSlot(d0, 0, type, iron)
+
+define iron HASH("ItemIronIngot")
+ss d0 0 PrefabHash iron
+
+# Not unary operator on device attributes
+if !d0.ClearMemory then
+  yield
+end
+
+l r0 d0 ClearMemory
+seq r0 r0 0
+beq r0 0 end1
+yield
+end1:
+
+# Using IC10 globals
+x = DisplayMode.Seconds
+sleep(x)
+
+move r10 DisplayMode.Seconds
+sleep r10
 `;
 
 function format(char) {

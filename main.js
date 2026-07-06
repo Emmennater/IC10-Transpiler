@@ -165,7 +165,7 @@ const lang = LRLanguage.define({
       styleTags({
         Number: t.number,
         "AddOp MulOp CompareOp LogicAnd LogicOr ParenLeft ParenRight Assign Dot Colon Comma": t.operator,
-        "InstructionName FunctionName": t.function(t.variableName),
+        "InstructionName FunctionName JumpInstructionName": t.function(t.variableName),
         "if then elif else end let while do loop break continue device define": t.keyword,
         String: t.string,
         Device: device,
@@ -443,6 +443,9 @@ function run() {
   const ast = getAST(text);
   let ic10 = "";
   
+  // console.log(ast);
+  // return;
+
   try {
     ic10 = transpile(ast, text);
     clearErrors();

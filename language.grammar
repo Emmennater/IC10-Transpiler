@@ -5,23 +5,24 @@ kwn<term> { @specialize[@name={term}]<identifier, term> }
 
 @top program { block }
 
-block { newline* ((statement (newline+ statement)*) newline*)? }
+block { statement* }
 
 statement {
   Instruction | IfExpr | WhileExpr | LoopExpr | Declaration | DeviceDeclaration |
-  Definition | Assignment | Label | kwn<"break"> | kwn<"continue">
+  Definition | Assignment | Label | kwn<"break"> | kwn<"continue"> | FunctionCall | Jump
 }
 
-Instruction { InstructionName expression* }
+If { kwn<"if"> expression kwn<"then"> block }
 
-If { kwn<"if"> expression kwn<"then"> newline block }
-ElseIf { kwn<"elif"> expression kwn<"then"> newline block }
-Else { kwn<"else"> newline block }
+ElseIf { kwn<"elif"> expression kwn<"then"> block }
+
+Else { kwn<"else"> block }
+
 IfExpr { If ElseIf* Else? kwn<"end"> }
 
-WhileExpr { kwn<"while"> expression kwn<"do"> newline block kwn<"end"> }
+WhileExpr { kwn<"while"> expression kwn<"do"> block kwn<"end"> }
 
-LoopExpr { kwn<"loop"> newline block kwn<"end"> }
+LoopExpr { kwn<"loop"> block kwn<"end"> }
 
 VariableName { identifier }
 
@@ -38,7 +39,7 @@ LabelName { identifier }
 Label { LabelName Colon }
 
 expression {
-  Property | Number | UnaryOp | BinaryOp | String | Parens | FunctionCall | Bool
+  Parens | Property | Number | UnaryOp | BinaryOp | String | FunctionCall | Bool
 }
 
 Parens { ParenLeft expression ParenRight }
@@ -53,7 +54,15 @@ BinaryOp {
   expression !or LogicOr expression
 }
 
-FunctionCall { VariableName !call ParenLeft expression (Comma expression)* ParenRight }
+FunctionCall { FunctionName !call ParenLeft expression (Comma expression)* ParenRight }
+
+FunctionName { identifier }
+
+Jump { JumpInstructionName (VariableName | Register) }
+
+JumpInstructionName { kw<"j"> | kw<"jal"> }
+
+Instruction { InstructionName }
 
 InstructionName { identifier }
 
@@ -93,4 +102,4 @@ Property { (VariableName | Register | Device) (Dot Property)? }
   @precedence { Comment, MulOp }
 }
 
-@skip { space | Comment }
+@skip { space | newline | Comment }

@@ -1,5 +1,5 @@
 # High-Level Language for Stationeers IC10
-This is a `high-level language` for `IC10` that is meant to be fully `backwards compatible` with the standard IC10 programming language. Any IC10 you write will be in the compiled output. This means that if there is a function missing you will be able to use it regardless.
+This is a `high-level language` for `IC10` that is meant to be fully `backwards compatible` with the standard IC10 programming language. Any function written that is not recognized by the compiler will be converted into an IC10 instruction.
 ## Documentation
 The top example is written in the high level code.
 The bottom example is the compiled output in `IC10`.
@@ -9,12 +9,13 @@ The bottom example is the compiled output in `IC10`.
 - [Comments](#comments)
 - [Arithmetic](#arithmetic)
 - [Booleans](#booleans)
+- [Labels and Jumps](#labels-and-jumps)
 - [Loops](#loops)
 - [If Statements](#if-statements)
 - [Using Devices](#using-devices)
 - [Using Definitions](#using-definitions)
 - [Functions](#functions)
-- [Writing IC10 in the High-Level Language](#writing-ic10-in-the-high-level-language)
+- [Using IC10 Functions/Variables in the High-Level Language](#using-ic10-functionsvariables-in-the-high-level-language)
 - [Supported Operators](#supported-operators)
 
 ### Declaring Variables
@@ -59,6 +60,16 @@ y = false
 ```
 move r10 1
 move r11 0
+```
+### Labels and Jumps
+Labels can be used with jumps just like in IC10.
+The compiled output is the exact same.
+```
+top:
+jal bottom
+j top
+bottom:
+j ra
 ```
 ### Loops
 ```
@@ -157,11 +168,12 @@ s pump Setting 1
 l r10 pump On
 ```
 ### Using Definitions
-A list of all aggregator functions (like Sum) can be found [here](#functions).
+Definitions let you assign a number or a string to an identifier. A list of all aggregator functions (like Sum) can be found [here](#functions).
 ```
 define light = StructureWallLight
 define active = true
 define y = 100
+define logicType = "Setting"
 
 # Count how many lights are on
 x = Sum(light.On)
@@ -169,8 +181,8 @@ x = Sum(light.On)
 # Turn on all of your wall lights 
 light.On = active
 
-# Do something with y
-s db Setting y
+# Logic type based on definition
+s(db, logicType, y)
 ```
 ```
 define light HASH("StructureWallLight")
@@ -196,29 +208,46 @@ lbn r10 light HASH("Inside") On Sum
 sbn light HASH("Inside") On 1
 ```
 ### Functions
-Supported functions:
-- Average, Sum, Minimum, Maximum, LoadSlot
+Aggregator functions:
+- Average, Sum, Minimum, Maximum
+Everything else is converted directly into an IC10 instruction.
 ```
 # Take the average of a logic type for a device group
 x = Average(deviceHash.LogicType) # (deviceHash.logicType)
-
+```
+```
+lb r10 HASH("deviceHash") LogicType Average
+```
+String parameters can be used to specify an IC10 variable.
+loadSlot is unique in that the return value can be assigned to a variable.
+```
 # Load the quantity at slot 0 for device d0
 y = loadSlot(d0, 0, "Quantity") # (device, slot index, logic type)
 ```
 ```
-lb r10 HASH("deviceHash") LogicType Average
-ls r11 d0 0 Quantity
+ls r10 d0 0 Quantity
 ```
-### Writing IC10 in the High-Level Language
-Since this high level language is fully backwards compatible with IC10, this means you can use functions and variables from the standard IC10 language directly inside your code! You may be wondering how to write IC10 without using the registers. The solution is to just use the variable names and the compiler will substitute it with the register that it has been assigned.
+Example using setSlot:
 ```
-x = 1
+# Program a sorter
+define iron = ItemIronIngot
+define type = "PrefabHash"
+setSlot(d0, 0, type, iron)
+```
+```
+define iron HASH("ItemIronIngot")
+ss d0 0 PrefabHash iron
+```
+### Using IC10 Functions/Variables in the High-Level Language
+Since this high level language is fully backwards compatible with IC10, this means you can use functions and variables from the standard IC10 language directly inside your code! Functions are used in place of instructions. Just pass the parameters you would normally. You may be wondering how to write IC10 without using the registers. The solution is to just use the variable names and the compiler will substitute it with the register that it has been assigned.
+```
+x = DisplayMode.Seconds
 top:
-sleep x
+sleep(x)
 j top
 ```
 ```
-move r10 1
+move r10 DisplayMode.Seconds
 top:
 sleep r10
 j top

@@ -358,11 +358,23 @@ export function transpile(ast, text) {
     const isDeviceRef = devices.has(variableName);
     const isDeviceVar = DEVICE_REGISTERS.has(variableName);
 
+    if (defined.has(variableName)) {
+      if (outRegister !== "none") {
+        addInstruction(`move ${outRegister} ${variableName}`);
+      }
+
+      if (defined.get(variableName).type === "String") {
+        return { type: "String", text: defined.get(variableName).text };
+      }
+
+      return expr;
+    }
+
     if (isDeviceRef || isDeviceVar) {
       let device = variableName;
 
       if (expr.children.length === 1) {
-        throw new CompilerError("Expected property accessor");
+        return expr.children[0];
       }
 
       if (expr.children[2].children.length !== 1) {
@@ -384,10 +396,11 @@ export function transpile(ast, text) {
     
     if (!cache.has(variableName)) {
       if (outRegister !== "none") {
-        addInstruction(`move ${outRegister} ${variableName}`);
+        const idfs = collapseProperty(expr);
+        addInstruction(`move ${outRegister} ${idfs.map(idf => idf.text).join(".")}`);
       }
 
-      return { type: "Identifier", text: variableName };
+      return expr;
     }
 
     const { register, cacheInstructions } = cache.get(variableName, outRegister);
@@ -423,7 +436,7 @@ export function transpile(ast, text) {
   }
 
   function functionCall(expr, outRegister) {
-    const functionName = expr.children[0].text;
+    let functionName = expr.children[0].text;
 
     if (outRegister === "none") outRegister = cache.getTemp();
     
@@ -453,42 +466,68 @@ export function transpile(ast, text) {
       return { type: "Register", text: outRegister };
     }
 
-    // Check for valid batch mode
+    // Convert setSlot to ss (alias)
+    if (functionName === "setSlot") functionName = "ss";
+
     const batchModes = new Set(["Average", "Sum", "Minimum", "Maximum"]);
 
-    if (!batchModes.has(functionName)) {
-      throw new CompilerError("Invalid batch mode");
-    }
-
-    // Check if this is a batch operation
-    const argument = expr.children[2];
-    const idfs = collapseProperty(argument);
-
-    let x0 = idfs[0].text;
-    let x1 = idfs[1].text;
-
-    if (!defined.has(x0)) {
-      x0 = `HASH("${x0}")`;
-    }
-
-    if (idfs.length == 2) {
-      addInstruction(`lb ${outRegister} ${x0} ${x1} ${functionName}`);
-    } else if (idfs.length == 3) {
-      let x2 = idfs[2].text;
-
-      if (!defined.has(x1)) {
-        x1 = `HASH("${x1}")`;
+    if (batchModes.has(functionName)) {
+      // Check if this is a batch operation
+      const argument = expr.children[2];
+      const idfs = collapseProperty(argument);
+  
+      let x0 = idfs[0].text;
+      let x1 = idfs[1].text;
+  
+      if (!defined.has(x0)) {
+        x0 = `HASH("${x0}")`;
       }
-
-      addInstruction(`lbn ${outRegister} ${x0} ${x1} ${x2} ${functionName}`);
+  
+      if (idfs.length == 2) {
+        addInstruction(`lb ${outRegister} ${x0} ${x1} ${functionName}`);
+      } else if (idfs.length == 3) {
+        let x2 = idfs[2].text;
+  
+        if (!defined.has(x1)) {
+          x1 = `HASH("${x1}")`;
+        }
+  
+        addInstruction(`lbn ${outRegister} ${x0} ${x1} ${x2} ${functionName}`);
+      }
+  
+      return { type: "Register", text: outRegister };
     }
 
-    return { type: "Register", text: outRegister };
+    // Default to ic10 instruction
+    let args = [];
+
+    // Process arguments
+    for (let i = 2; i < expr.children.length; i += 2) {
+      args.push(processExpression(expr.children[i]));
+    }
+
+    // Free temporary arguments after processing
+    for (let arg of args) {
+      free(arg);
+    }
+
+    // Remove quotes from strings
+    for (let arg of args) {
+      if (arg.type === "String") {
+        arg.text = arg.text.slice(1, arg.text.length - 1);
+      }
+    }
+
+    addInstruction(`${functionName} ${args.map(arg => arg.text).join(" ")}`);
   }
 
   function processExpression(expr, outRegister = "none") {
     if (expr.type === "Number") {
       return number(expr, outRegister);
+    }
+
+    if (expr.type === "String") {
+      return expr;
     }
 
     if (expr.type === "Bool") {
@@ -687,11 +726,21 @@ export function transpile(ast, text) {
       addInstruction(`define ${variableName} ${value.text}`);
     } else if (value.type === "Bool") {
       addInstruction(`define ${variableName} ${value.text === "true" ? "1" : "0"}`);
-    } else {
+    } else if (value.type !== "String") {
       addInstruction(`define ${variableName} HASH("${value.text}")`);
     }
 
     defined.set(variableName, value);
+  }
+
+  function jump(statement) {
+    const istructionName = statement.children[0].text;
+    const label = statement.children[1].text;
+    addInstruction(`${istructionName} ${label}`);
+  }
+
+  function instruction(statement) {
+    addInstruction(statement.text);
   }
 
   function processStatement(statement, scope) {
@@ -743,21 +792,19 @@ export function transpile(ast, text) {
       return;
     }
 
-    // Not found: add raw instructions
-    let instruction = [];
-
-    for (let child of statement.children) {
-      if (child.type === "Property" && cache.has(child.text)) {
-        // Replace property with register
-        let { register, cacheInstructions } = cache.get(child.text, true);
-        addInstructions(cacheInstructions);
-        instruction.push(register);
-      } else {
-        instruction.push(child.text);
-      }
+    if (statement.type === "Jump") {
+      return jump(statement);
     }
 
-    addInstruction(instruction.join(" "));
+    if (statement.type === "Instruction") {
+      return instruction(statement);
+    }
+
+    if (statement.type === "FunctionCall") {
+      return functionCall(statement);
+    }
+
+    throw new CompilerError(`Unknown statement: ${statement.type}`);
   }
 
   function processStatements(statements, scope) {
