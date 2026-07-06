@@ -39,7 +39,7 @@ move r10 1
 move r11 r10
 ```
 ### Arithmetic
-Click [here](#operators) to see the list of all supported operators.
+Click [here](#supported-operators) to see the list of all supported operators.
 ```js
 let x = 2 * 2
 ```
