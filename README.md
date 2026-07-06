@@ -1,5 +1,6 @@
 # High-Level Language for Stationeers IC10
 This is a `high-level language` for `IC10` that is meant to be fully `backwards compatible` with the standard IC10 programming language. Any function written that is not recognized by the compiler will be converted into an IC10 instruction.
+![1783363348960](image/README/example.png)
 ## Documentation
 The top example is written in the high level code.
 The bottom example is the compiled output in `IC10`.
