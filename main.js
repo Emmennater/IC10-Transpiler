@@ -13,25 +13,11 @@ import { parser } from "./parser.js";
 import { transpile } from "./transpiler.js";
 import { runTests } from "./tests.js";
 import { getAST } from "./helper.js";
+import { setup, save, notSaved } from "./save-load.js";
 
-const starterCode = `
-device machine = d0
-device stacker = d1
+const starterCode = "";
 
-machine.ClearMemory = 1
-
-loop
-  yield
-  if machine.ExportCount == stacker.Setting then
-    machine.Activate = 0
-    machine.ClearMemory = 1
-    continue
-  elif machine.Activate == 0 then
-    machine.ClearMemory = 1
-    break
-  end
-end
-`.substring(1);
+let ignoreSave = false;
 
 const device = Tag.define();
 const register = Tag.define();
@@ -102,7 +88,7 @@ const myCustomTheme = EditorView.theme({
   // Scrollbar
   ".cm-scroller::-webkit-scrollbar": {
     width: "16px",
-    height: "12px"
+    height: "16px"
   },
   ".cm-scroller::-webkit-scrollbar-thumb": {
     backgroundColor: "#ffffff22",
@@ -131,7 +117,7 @@ const lang = LRLanguage.define({
     props: [
       styleTags({
         Number: t.number,
-        "AddOp MulOp CompareOp LogicAnd LogicOr ParenLeft ParenRight Assign Dot Colon": t.operator,
+        "AddOp MulOp CompareOp LogicAnd LogicOr ParenLeft ParenRight Assign Dot Colon Comma": t.operator,
         "InstructionName FunctionName": t.function(t.variableName),
         "if then elif else end let while do loop break continue device define": t.keyword,
         String: t.string,
@@ -247,8 +233,19 @@ const keymapExtensions = [
     }
   ]),
   EditorView.updateListener.of(update => {
+    // Only act when the selection actually changed in this update.
+    // This also skips viewport-only updates (e.g. manual scrolling),
+    // which otherwise have an empty transactions array and slip past
+    // the filters below.
+    if (!update.selectionSet) return;
+
     // Ignore cursor movements made with the mouse
     if (update.transactions.some(tr => tr.isUserEvent("select.pointer"))) {
+      return;
+    }
+
+    // Ignore scroll-triggered transactions
+    if (update.transactions.some(tr => tr.isUserEvent("scroll"))) {
       return;
     }
 
@@ -282,6 +279,29 @@ const keymapExtensions = [
   })
 ];
 
+const autosaveExtensions = [
+  history(),
+  keymap.of([
+    {
+      key: "Mod-s",
+      run: () => {
+        const text = editor.state.doc.toString();
+        save(text, false);
+        return true;
+      }
+    }
+  ]),
+  EditorView.updateListener.of((update) => {
+    // Only trigger if the actual text content changed
+    if (update.docChanged && !ignoreSave) {
+      const text = editor.state.doc.toString();
+      notSaved();
+      save(text);
+      return false;
+    }
+  })
+];
+
 const myCustomExtensions = [
   myCustomThemeExtension,
   lang,
@@ -299,7 +319,7 @@ const nonEditable = [
 const editor = new EditorView({
   parent: document.getElementById("editor-container"),
   doc: starterCode,
-  extensions: [...myCustomExtensions, ...keymapExtensions]
+  extensions: [...myCustomExtensions, ...keymapExtensions, ...autosaveExtensions]
 });
 
 const output = new EditorView({
@@ -308,56 +328,57 @@ const output = new EditorView({
   extensions: [...nonEditable, ...myCustomExtensions]
 });
 
-// Editor scrolling
-const scrollerEditor = editor.scrollDOM;
+function initListeners() {
+  // Editor scrolling
+  const scrollerEditor = editor.scrollDOM;
 
-const resizeEditor = new ResizeObserver(() => {
-  scrollerEditor.style.setProperty(
-    "--scroll-padding",
-    `${scrollerEditor.clientHeight - editor.defaultLineHeight}px`
-  );
-});
+  const resizeEditor = new ResizeObserver(() => {
+    scrollerEditor.style.setProperty(
+      "--scroll-padding",
+      `${scrollerEditor.clientHeight - editor.defaultLineHeight}px`
+    );
+  });
 
-resizeEditor.observe(scrollerEditor);
+  resizeEditor.observe(scrollerEditor);
 
-// Output scrolling
-const scrollerOutput = output.scrollDOM;
+  // Output scrolling
+  const scrollerOutput = output.scrollDOM;
 
-const resizeOutput = new ResizeObserver(() => {
-  scrollerOutput.style.setProperty(
-    "--scroll-padding",
-    `${scrollerOutput.clientHeight - output.defaultLineHeight}px`
-  );
-});
+  const resizeOutput = new ResizeObserver(() => {
+    scrollerOutput.style.setProperty(
+      "--scroll-padding",
+      `${scrollerOutput.clientHeight - output.defaultLineHeight}px`
+    );
+  });
 
-resizeOutput.observe(scrollerOutput);
+  resizeOutput.observe(scrollerOutput);
 
-function showTree(tree, text) {
-  const getLineNum = pos => {
-    const line = editor.state.doc.lineAt(pos);
-    return line.number;
-  };
+  document.getElementById("run").addEventListener("mousedown", run);
 
-  const getColumnNum = pos => {
-    const line = editor.state.doc.lineAt(pos);
-    return pos - line.from;
-  };
-
-  tree.iterate({
-    enter(node) {
-      const lineNum = getLineNum(node.from);
-      const columnNum = getColumnNum(node.from);
-      const str = text.substring(node.from, node.to).replace(/\n/g, "\\n\n");
-      console.log(
-        "  ".repeat(node.node.depth) +
-        `${node.type.name}\n${str}`
-      );
-    }
+  document.getElementById("copy").addEventListener("mousedown", () => {
+    const text = output.state.doc.toString();
+    navigator.clipboard.writeText(text);
   });
 }
 
+function getScript() {
+  return editor.state.doc.toString();
+}
+
+function loadScript(text) {
+  ignoreSave = true;
+  editor.dispatch({
+    changes: {
+      from: 0,
+      to: editor.state.doc.length,
+      insert: text
+    }
+  });
+  setTimeout(() => ignoreSave = false, 100);
+}
+
 function run() {
-  const text = editor.state.doc.toString();
+  const text = getScript();
   const ast = getAST(text);
   const ic10 = transpile(ast);
   
@@ -370,13 +391,7 @@ function run() {
   });
 }
 
-document.getElementById("run").addEventListener("click", run);
-
-document.getElementById("copy").addEventListener("click", () => {
-  const text = output.state.doc.toString();
-  navigator.clipboard.writeText(text);
-})
-
-// runTests(parser);
-
+initListeners();
+setup(loadScript, getScript, run);
+runTests(parser);
 run();

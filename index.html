@@ -15,7 +15,17 @@
             <span class="mid">Compiler</span> //
             <span class="end">v1.0</span>
           </span>
-          <button id="run">Run</button>
+          <div class="options">
+            <div id="saved-icon">✔</div>
+            <div class="input-wrapper">
+              <input id="scripts-input" type="text">
+              <button id="scripts-button">V</button>
+              <button id="new-script">+</button>
+              <button id="delete-script">🗑</button>
+              <div id="scripts" class="dropdown" style="display: none;"></div>
+            </div>
+            <button id="run">Run</button>
+          </div class="options">
         </div>
       </hbox>
       <div id="editor-container" class="text-editor"></div>
@@ -26,7 +36,9 @@
           <span class="title">
             <span class="output">IC10</span>
           </span>
-          <button id="copy">Copy</button>
+          <div class="options">
+            <button id="copy">Copy</button>
+          </div>
         </div>
       </hbox>
       <div id="output-container" class="text-editor"></div>

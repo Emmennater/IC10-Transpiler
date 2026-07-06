@@ -336,7 +336,7 @@ export function transpile(ast) {
     const isDeviceVar = DEVICE_REGISTERS.has(variableName);
 
     if (isDeviceRef || isDeviceVar) {
-      let device = isDeviceRef ? devices.get(variableName) : variableName;
+      let device = variableName;
 
       if (expr.children.length === 1) {
         throw "Expected property accessor";
@@ -410,6 +410,26 @@ export function transpile(ast) {
       return { type: "Register", text: outRegister };
     }
 
+    if (functionName === "loadSlot") {
+      let device = expr.children[2];
+      let slot = processExpression(expr.children[4]);
+
+      free(slot);
+
+      let attribute = expr.children[6];
+
+      if (attribute.type !== "String") {
+        throw "Expected slot attribute to be a string";
+      }
+
+      // Remove quotes
+      let attributeName = attribute.text.slice(1, attribute.text.length - 1);
+
+      addInstruction(`ls ${outRegister} ${device.text} ${slot.text} ${attributeName}`);
+
+      return { type: "Register", text: outRegister };
+    }
+
     // Check for valid batch mode
     const batchModes = new Set(["Average", "Sum", "Minimum", "Maximum"]);
 
@@ -418,7 +438,7 @@ export function transpile(ast) {
     }
 
     // Check if this is a batch operation
-    const argument = expr.children[1].children[1];
+    const argument = expr.children[2];
     const idfs = collapseProperty(argument);
 
     let x0 = idfs[0].text;
@@ -520,12 +540,7 @@ export function transpile(ast) {
     // Setting device attributes
     let device = idfs[0];
 
-    // Load device register if it is defined
-    if (devices.has(device.text)) {
-      device = { type: "Device", text: devices.get(device.text) };
-    }
-
-    if (device.type === "Device") {
+    if (device.type === "Device" || devices.has(device.text)) {
       if (idfs.length !== 2) {
         throw "Expected only one property accessor";
       }
@@ -633,13 +648,20 @@ export function transpile(ast) {
   function deviceDeclaration(statement) {
     const variableName = statement.children[1].text;
     const deviceRegister = statement.children[3].text;
+    addInstruction(`alias ${variableName} ${deviceRegister}`);
     devices.set(variableName, deviceRegister);
   }
 
   function definition(statement) {
     const variableName = statement.children[1].text;
-    const value = statement.children[2].text;
-    addInstruction(`define ${variableName} HASH("${value}")`);
+    const value = statement.children[3];
+
+    if (value.type === "Number") {
+      addInstruction(`define ${variableName} ${value.text}`);
+    } else {
+      addInstruction(`define ${variableName} HASH("${value.text}")`);
+    }
+
     defined.set(variableName, value);
   }
 
@@ -677,6 +699,15 @@ export function transpile(ast) {
 
     if (statement.type === "Definition") {
       return definition(statement);
+    }
+
+    if (statement.type === "Comment") {
+      return;
+    }
+
+    if (statement.type === "Label") {
+      addInstruction(statement.text);
+      return;
     }
 
     // Not found: add raw instructions

@@ -29,7 +29,7 @@ Declaration { @specialize[@name="let"]<identifier, "let"> VariableName (Assign e
 
 DeviceDeclaration { @specialize[@name="device"]<identifier, "device"> VariableName Assign Device }
 
-Definition { @specialize[@name="define"]<identifier, "define"> VariableName expression }
+Definition { @specialize[@name="define"]<identifier, "define"> VariableName Assign expression }
 
 Assignment { Property Assign expression }
 
@@ -53,7 +53,7 @@ BinaryOp {
   expression !or LogicOr expression
 }
 
-FunctionCall { VariableName !call Parens }
+FunctionCall { VariableName !call ParenLeft expression (Comma expression)* ParenRight }
 
 InstructionName { identifier }
 
@@ -85,6 +85,7 @@ Property { (VariableName | Register | Device) (Dot Property)? }
   ParenLeft { "(" }
   ParenRight { ")" }
   Colon { ":" }
+  Comma { "," }
   Dot { "." }
   newline { "\n" }
   String { '"' (!["\\] | "\\" _)* '"' }

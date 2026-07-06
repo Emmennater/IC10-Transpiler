@@ -95,7 +95,8 @@ device machine = d0
 machine.ClearMemory = 1
 d0.ClearMemory = 1
 
-s d0 ClearMemory 1
+alias machine d0
+s machine ClearMemory 1
 s d0 ClearMemory 1
 
 # Reading from devices
@@ -104,8 +105,9 @@ x = machine.ClearMemory
 let x = machine.Setting
 let y = d0.Pressure
 
-l r10 d0 ClearMemory
-l r10 d0 Setting
+alias machine d0
+l r10 machine ClearMemory
+l r10 machine Setting
 l r11 d0 Pressure
 
 # Using devices in if statements
@@ -198,13 +200,30 @@ sbn HASH("StructurePipeAnalyzer") HASH("pipe0") Setting 1
 lbn r10 HASH("StructurePipeAnalyzer") HASH("pipe0") Pressure Average
 
 # Definitions
-define analyzer StructurePipeAnalyzer
+define analyzer = StructurePipeAnalyzer
 analyzer.pipe0.Setting = 1
 let x = Average(analyzer.pipe0.Pressure)
 
 define analyzer HASH("StructurePipeAnalyzer")
 sbn analyzer HASH("pipe0") Setting 1
 lbn r10 analyzer HASH("pipe0") Pressure Average
+
+# Register and device backwards compatibility
+device larre = d0
+let x
+ls x larre 255 damage
+
+alias larre d0
+ls r10 larre 255 damage
+
+# Load slot function
+device larre = d0
+define slot = 255
+let x = loadSlot(larre, slot, "damage")
+
+alias larre d0
+define slot 255
+ls r10 larre slot damage
 `;
 
 function format(char) {
