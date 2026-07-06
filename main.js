@@ -24,6 +24,7 @@ const device = Tag.define();
 const register = Tag.define();
 
 let errorMessage = "";
+let errorLine = 0;
 
 class ErrorOverlayWidget extends WidgetType {
   constructor(message) {
@@ -44,11 +45,10 @@ const errorOverlayField = StateField.define({
     return Decoration.none;
   },
   update(decorations, tr) {
-    const lineToHighlight = 1; 
     const doc = tr.state.doc;
     
-    if (doc.lines >= lineToHighlight && errorMessage) {
-      const line = doc.line(lineToHighlight);
+    if (doc.lines >= errorLine && errorMessage) {
+      const line = doc.line(errorLine);
       
       // side: 1 ensures it renders exactly at the end of the text
       const errorWidget = Decoration.widget({
@@ -439,6 +439,16 @@ function clearErrors() {
   }
 }
 
+const getLineNum = pos => {
+  const line = editor.state.doc.lineAt(pos);
+  return line.number;
+};
+
+const getColumnNum = pos => {
+  const line = editor.state.doc.lineAt(pos);
+  return pos - line.from;
+};
+
 function run() {
   const text = getScript();
   const ast = getAST(text);
@@ -472,6 +482,7 @@ function run() {
       );
 
       errorMessage = error.message;
+      errorLine = getLineNum(error.to);
       forceLinting(editor);
       editor.dispatch({});
     } else {
