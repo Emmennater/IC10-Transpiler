@@ -1,7 +1,7 @@
 # High-Level Language for Stationeers IC10
 ### [>>> Visit Website <<<](https://emmennater.github.io/IC10-Compiler/)
 This is a `high-level language` for `IC10` that is meant to be fully `backwards compatible` with the standard IC10 programming language. Any function written that is not recognized by the compiler will be converted into an IC10 instruction.
-![1783363348960](image/README/example.png)
+![example](image/README/example.png)
 ## Using the Compiler
 When you first load the webpage a default script will be loaded. The `✖` next to the name `default-script` means the script is not saved.
 A checkmark `✔` indicates the script has been saved and you can safely retrieve it later.
