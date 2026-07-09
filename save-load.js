@@ -221,10 +221,12 @@ export function setup(loadScript, getScript, compile) {
         if (!lastSaved &&
           !window.confirm("You have unsaved changes. Are you sure you want to open a new script?")) {
           scripts.style.display = "none";
+          document.getElementById("scripts-input-wrapper").classList.toggle("open");
           return;
         }
 
         document.getElementById("scripts-input").value = name;
+        document.getElementById("scripts-input-wrapper").classList.toggle("open");
         const scriptText = getSavedScript(name);
 
         if (scriptText !== undefined) {
