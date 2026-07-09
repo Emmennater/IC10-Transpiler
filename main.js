@@ -11,10 +11,9 @@ import { insertTab, indentLess, indentMore, history, historyKeymap, toggleCommen
 import { LRLanguage, HighlightStyle, syntaxHighlighting, indentUnit } from "@codemirror/language";
 import { setDiagnostics, lintGutter, forceLinting } from "@codemirror/lint";
 import { styleTags, tags as t, Tag } from "@lezer/highlight";
-import { parser } from "./parser.js";
+import { parser as parser_lang } from "./parser_lang.js";
 import { parser as parser_ic10 } from "./parser_ic10.js";
-import { transpile, CompilerError } from "./compiler.js";
-import { runTests } from "./tests.js";
+import { compile, CompilerError } from "./compiler.js";
 import { getAST } from "./helper.js";
 import { setup, save, notSaved } from "./save-load.js";
 
@@ -161,7 +160,7 @@ const myCustomThemeExtension = [
 ];
 
 const lang = LRLanguage.define({
-  parser: parser.configure({
+  parser: parser_lang.configure({
     props: [
       styleTags({
         "AddOp MulOp CompareOp LogicAnd LogicOr ParenLeft ParenRight Assign Dot Colon Comma \
@@ -467,7 +466,7 @@ const customCursorExt = ViewPlugin.fromClass(class {
 const myCustomExtensions = [
   myCustomThemeExtension,
   customCursorExt,
-  lineNumbers(),
+  lineNumbers({ formatNumber: n => n - 1 }),
   highlightActiveLineGutter(),
   highlightActiveLine(),
 ];
@@ -568,7 +567,7 @@ function run() {
   // return;
 
   try {
-    ic10 = transpile(ast, text);
+    ic10 = compile(ast);
     clearErrors();
 
     output.dispatch({
@@ -604,6 +603,5 @@ function run() {
 
 initListeners();
 setup(loadScript, getScript, run);
-// runTests(parser);
 
 window.editor = editor;

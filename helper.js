@@ -1,4 +1,4 @@
-import { parser } from "./parser.js";
+import { parser as parser_lang } from "./parser_lang.js";
 
 function nodeToJSON(cursor, text) {
   const result = {
@@ -20,7 +20,7 @@ function nodeToJSON(cursor, text) {
 }
 
 export function getAST(text) {
-  const tree = parser.parse(text);
+  const tree = parser_lang.parse(text);
   const ast = nodeToJSON(tree.cursor(), text);
   return ast;
 }

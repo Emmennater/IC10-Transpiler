@@ -31,20 +31,23 @@ The bottom example is the compiled output in `IC10`.
 - [If Statements](#if-statements)
 - [Using Devices](#using-devices)
 - [Using Definitions](#using-definitions)
-- [Functions](#functions)
+- [Calling Functions](#calling-functions)
+- [Defining Functions](#defining-functions)
 - [Using IC10 Functions/Variables in the High-Level Language](#using-ic10-functionsvariables-in-the-high-level-language)
 - [Supported Operators](#supported-operators)
 
 ### Declaring Variables
-`let` is currently just syntax sugar and only used to define variables without giving a value. There are no variable scopes at the moment. `numbers` are the only thing that can be assigned to variables.
+`let` is currently just syntax sugar and only used to define variables without giving a value. There are no variable scopes at the moment. `numbers` and `strings` are the only thing that can be assigned to variables.
 ```
 let pi
 let y = -2
 pi = 3.14
+let s = "Hello World!"
 ```
 ```
 move r11 -2
 move r10 3.14
+move r12 HASH("Hello World!")
 ```
 You can still technically use all the registers, but this may interfere with how variables are used by the compiler *(not recommended)*.
 ### Using Variables
@@ -249,7 +252,24 @@ define light HASH("StructureWallLight")
 lbn r10 light HASH("Inside") On Sum
 sbn light HASH("Inside") On 1
 ```
-### Functions
+Setting a variable to a definition of a string will hash it.
+```
+define str = "Hello World!"
+let s = str
+```
+```
+move r10 HASH("Hello World!")
+```
+It is the same behavior as not using quotes.
+```
+define str = HelloWorld
+let s = str
+```
+```
+define str HASH("HelloWorld")
+move r10 str
+```
+### Calling Functions
 Aggregator functions:
 - Average, Sum, Minimum, Maximum
 Everything else is converted directly into an IC10 instruction.
@@ -261,10 +281,10 @@ x = Average(deviceHash.LogicType) # (deviceHash.logicType)
 lb r10 HASH("deviceHash") LogicType Average
 ```
 String parameters can be used to specify an IC10 variable.
-loadSlot is unique in that the return value can be assigned to a variable.
+loadSlot is unique in that the return value can be assigned to a variable directly without using a parameter.
 ```
 # Load the quantity at slot 0 for device d0
-y = loadSlot(d0, 0, "Quantity") # (device, slot index, logic type)
+y = loadSlot(d0, 0, Quantity) # (device, slot index, logic type)
 ```
 ```
 ls r10 d0 0 Quantity
@@ -280,6 +300,29 @@ setSlot(d0, 0, type, iron)
 define iron HASH("ItemIronIngot")
 ss d0 0 PrefabHash iron
 ```
+### Defining Functions
+After some work, we finally got our own functions with their own scope!
+Here is how you use them:
+```
+fn foo(a, b)
+  return a + b
+end
+x = foo(1, 2)
+```
+When you use functions you will see some extra code at the top of your program
+this is to handle the use of stack when entering/leaving function scope.
+You can also try your hand at some recursive functions!
+```
+fn fib(n)
+  if n <= 1 then
+    return n
+  end
+  return fib(n - 1) + fib(n - 2)
+end
+x = fib(6)
+```
+Keep in mind the overhead when using functions. It isn't too much when you just have
+a single function, but when you nest them it can grow to be quite a bit!
 ### Using IC10 Functions/Variables in the High-Level Language
 Since this high level language is fully backwards compatible with IC10, this means you can use functions and variables from the standard IC10 language directly inside your code! Functions are used in place of instructions. Just pass the parameters you would normally. You may be wondering how to write IC10 without using the registers. The solution is to just use the variable names and the compiler will substitute it with the register that it has been assigned.
 ```

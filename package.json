@@ -7,12 +7,15 @@
     "dev": "npx vite",
     "build": "npx vite build",
     "preview": "npx vite preview",
-    "deploy": "gh-pages -d dist"
+    "deploy": "gh-pages -d dist",
+    "test": "npx mocha tests.js",
+    "genic10": "npx lezer-generator ic10.grammar -o parser_ic10.js",
+    "genlang": "npx lezer-generator lang.grammar -o parser_lang.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "type": "commonjs",
+  "type": "module",
   "homepage": "https://emmennater.github.io/IC10-Compiler",
   "dependencies": {
     "@codemirror/autocomplete": "^6.20.3",
@@ -25,7 +28,8 @@
     "@lezer/generator": "^1.8.0",
     "@lezer/highlight": "^1.2.3",
     "@lezer/lr": "^1.4.10",
-    "codemirror": "^6.0.2"
+    "codemirror": "^6.0.2",
+    "mocha": "^11.7.6"
   },
   "devDependencies": {
     "gh-pages": "^6.3.0",

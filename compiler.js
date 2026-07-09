@@ -7,44 +7,6 @@ Stack pointer (sp or r16)
 Return address (ra or r17)
 */
 
-/*
-Input:
-let x0 = 0
-let x1 = 1
-let x2 = 2
-let x3 = 3
-let x4 = 4
-let x5 = 5
-let x6 = 6
-
-Output:
-move r10 0
-move r11 1
-move r12 2
-move r13 3
-move r14 4
-move r15 5
-
-# LRU replacement
-put db 0 r10
-move r10 6
-*/
-
-export class CompilerError extends Error {
-  static from = 0;
-  static to = 0;
-
-  constructor(message) {
-    super(message);
-    this.from = CompilerError.from;
-    this.to = CompilerError.to;
-  }
-
-  toString() {
-    return `${this.message} from ${this.from} to ${this.to}`;
-  }
-}
-
 const OP_INSTRUCTIONS = {
   "+": "add",
   "-": "sub",
@@ -64,7 +26,25 @@ const OP_INSTRUCTIONS = {
 
 const DEVICE_REGISTERS = new Set(["d0", "d1", "d2", "d3", "d4", "d5"]);
 const SAVED_REGISTERS = ["r10", "r11", "r12", "r13", "r14", "r15"];
-const TEMP_REGISTERS = ["r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8"];
+const TEMP_REGISTERS = ["r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7"];
+const RETURN_REGISTER = "r9";
+const DUMMY_REGISER = "r8";
+
+const STEP_SUBROUTINES = `
+stepInto:
+move r8 10
+push rr8
+add r8 r8 1
+brne r8 16 -2
+push sp
+j ra
+stepOut:
+pop sp
+move r8 15
+pop rr8
+sub r8 r8 1
+brne r8 9 -2
+j ra`.slice(1);
 
 function compareRegisters(a, b) {
   // Sort registers by number (descending)
@@ -75,7 +55,20 @@ function round(n) {
   return Math.round(n * 1e14) / 1e14;
 }
 
-// Need to be able to update dirt registers using the register
+export class CompilerError extends Error {
+  static from = 0;
+  static to = 0;
+
+  constructor(message) {
+    super(message);
+    this.from = CompilerError.from;
+    this.to = CompilerError.to;
+  }
+
+  toString() {
+    return `${this.message} from ${this.from} to ${this.to}`;
+  }
+}
 
 class Stack {
   constructor(size) {
@@ -163,7 +156,15 @@ class LRUCache {
     if (this.dirtyReg.has(register)) {
       let oldVarName = this.reg2var.get(register);
       let stackOffset = this.stack.get(oldVarName);
-      instructions.push(`put db ${stackOffset} ${register}`);
+    
+      if (stackOffset == 0) {
+        // No need to calculate the stack offset when the offset is 0
+        instructions.push(`put db sp ${register}`);
+      } else {
+        instructions.push(`add ${DUMMY_REGISER} sp ${stackOffset}`);
+        instructions.push(`put db ${DUMMY_REGISER} ${register}`);
+      }
+
       this.dirtyReg.delete(register);
       this.var2reg.delete(oldVarName);
     }
@@ -212,7 +213,17 @@ class LRUCache {
 
     // Load the variable into the register
     let stackOffset = this.stack.get(varName);
-    this.addInstructions([`get ${register} db ${stackOffset}`]);
+    let instructions = [];
+
+    if (stackOffset == 0) {
+      // No need to calculate the stack offset when the offset is 0
+      instructions.push(`get ${register} db sp`);
+    } else {
+      instructions.push(`add ${DUMMY_REGISER} sp ${stackOffset}`);
+      instructions.push(`get ${register} db ${DUMMY_REGISER}`);
+    }
+
+    this.addInstructions(instructions);
 
     return register;
   }
@@ -226,18 +237,30 @@ class LRUCache {
     this.dirtyReg.delete(register);
     this.notUsed(register);
   }
+
+  assign(varName, register) {
+    if (this.var2reg.has(varName)) {
+      throw new CompilerError(`Variable ${varName} is already assigned!`);
+    }
+
+    this.var2reg.set(varName, register);
+    this.reg2var.set(register, varName);
+    this.used(register);
+  }
 }
 
 class Cache {
   // TODO:
   // When adding variable scopes, use this to track the active scope
-  // The transpiler will automatically update this depending on the current scope
+  // The compiler will automatically update this depending on the current scope
   static activeScope = null;
 
   constructor(addInstructions) {
     this.stack = new Stack(512);
+    this.cacheStack = [];
     this.savedCache = new LRUCache(this.stack, SAVED_REGISTERS, addInstructions);
     this.tempCache = new LRUCache(this.stack, TEMP_REGISTERS, addInstructions);
+    this.addInstructions = addInstructions;
     this.tempNameCounter = 0;
   }
 
@@ -251,16 +274,17 @@ class Cache {
 
   has(varExpr) {
     let varName = this.nameOf(varExpr);
-    if (this.isTemp(varName)) {
-      return this.tempCache.has(varName);
-    } else {
-      return this.savedCache.has(varName);
-    }
+    return this.tempCache.has(varName) || this.savedCache.has(varName);
   }
 
   load(varExpr) {
     let varName = this.nameOf(varExpr);
-    if (this.isTemp(varName)) {
+
+    if (this.tempCache.has(varName)) {
+      return this.tempCache.load(varName);
+    } else if (this.savedCache.has(varName)) {
+      return this.savedCache.load(varName);
+    } else if (this.isTemp(varName)) {
       return this.tempCache.load(varName);
     } else {
       return this.savedCache.load(varName);
@@ -269,7 +293,12 @@ class Cache {
 
   get(varExpr) {
     let varName = this.nameOf(varExpr);
-    if (this.isTemp(varName)) {
+
+    if (this.tempCache.has(varName)) {
+      return this.tempCache.get(varName);
+    } else if (this.savedCache.has(varName)) {
+      return this.savedCache.get(varName);
+    } else if (this.isTemp(varName)) {
       return this.tempCache.get(varName);
     } else {
       return this.savedCache.get(varName);
@@ -278,7 +307,12 @@ class Cache {
 
   free(varExpr) {
     let varName = this.nameOf(varExpr);
-    if (this.isTemp(varName)) {
+
+    if (this.tempCache.has(varName)) {
+      this.tempCache.free(varName);
+    } else if (this.savedCache.has(varName)) {
+      this.savedCache.free(varName);
+    } else if (this.isTemp(varName)) {
       this.tempCache.free(varName);
     } else {
       this.savedCache.free(varName);
@@ -289,6 +323,8 @@ class Cache {
     let varName = this.nameOf(varExpr);
     if (this.isTemp(varName)) {
       this.tempCache.free(varName);
+    } else if (varName.startsWith("v*")) {
+      this.savedCache.free(varName);
     } else {
       throw new CompilerError(`Expected temporary variable, got: ${varName}`);
     }
@@ -306,27 +342,52 @@ class Cache {
     }
   }
 
-  newTemp() {
-    return { type: "VariableName", text: `*${this.tempNameCounter++}` };
+  newTemp(useSavedCache = false) {
+    if (useSavedCache) {
+      return { type: "VariableName", text: `v*${this.tempNameCounter++}` };
+    } else {
+      return { type: "VariableName", text: `*${this.tempNameCounter++}` };
+    }
   }
 
   isTemp(varName) {
     return varName.startsWith("*");
   }
+
+  stepInto() {
+    this.cacheStack.push([
+      this.savedCache,
+      this.tempCache
+    ]);
+
+    this.savedCache = new LRUCache(this.stack, SAVED_REGISTERS, this.addInstructions);
+    this.tempCache = new LRUCache(this.stack, TEMP_REGISTERS, this.addInstructions);
+  }
+
+  stepOut() {
+    let [savedCache, tempCache] = this.cacheStack.pop();
+    this.savedCache = savedCache;
+    this.tempCache = tempCache;
+  }
 }
 
-// Everwhere outRegister, cache.getTemp() and free() was used needs to be reevaluated
-// outRegister needs to be replaced with outVar
+// Post process the output to remove all labels
+// and replace them with line numbers
+// With any defined functions add the stepIn
+// and stepOut subroutines to the top with a jump
+// to skip them
 
-export function transpile(ast, text) {
+export function compile(ast, config = {}) {
   let gen = "";
+  let prependGen = "";
+  let prepending = false;
   let statements = ast.children;
   let nScopes = 0;
   let cache = new Cache(addInstructions);
   let devices = new Map(); // Device name -> device register
-  let unusedLoopEnds = new Set();
-  let defined = new Map();
-  let definedFns = new Map();
+  let unusedLoopEnds = new Set(); // End-of-loop labels that have not been used
+  let defined = new Map(); // Variable name -> value
+  let definedFns = new Set(); // Function definitions
 
   // Helpers
   function createRootScope() {
@@ -348,13 +409,21 @@ export function transpile(ast, text) {
   }
 
   function addInstruction(instruction) {
-    gen += instruction + "\n";
+    if (prepending) {
+      prependGen += instruction + "\n";
+    } else {
+      gen += instruction + "\n";
+    }
   }
 
   function addInstructions(instructions) {
     for (let instruction of instructions) {
       addInstruction(instruction);
     }
+  }
+
+  function prependEnabled(prepend) {
+    prepending = prepend;
   }
 
   function reverseSign(numberString) {
@@ -416,15 +485,35 @@ export function transpile(ast, text) {
     defined.set(variableName, value);
   }
 
-  function locationOf(index) {
-    // Count number of newlines before index to get line number
-    const line = text.slice(0, index).split("\n").length - 1;
-    const column = index - text.lastIndexOf("\n", index) - 1;
-    return [line, column];
+  function findInstruction(statement, filter) {
+    if (filter(statement)) {
+      return statement;
+    }
+
+    for (let child of statement.children) {
+      let result = findInstruction(child, filter);
+      if (result) {
+        return result;
+      }
+    }
+
+    return null;
   }
 
-  function coords(from, to) {
-    return [locationOf(from), locationOf(to)];
+  function findInstructionParentIdx(statement, filter) {
+    // Find the instruction and return the parent and the child index
+    if (filter(statement)) {
+      return { parent: null, index: -1 };
+    }
+
+    for (let i = 0; i < statement.children.length; i++) {
+      let result = findInstructionParentIdx(statement.children[i], filter);
+      if (result) {
+        return { parent: statement, index: i };
+      }
+    }
+
+    return null;
   }
 
   // Memory
@@ -446,6 +535,11 @@ export function transpile(ast, text) {
   function load(expr) {
     // NOTE: Before changing this to accept things other than VariableName,
     // do you need to use get(expr) to get the value instead of load(expr)?
+
+    // Exception: return registers
+    if (expr.type === "Register") {
+      return expr.text;
+    }
 
     // Get the final value of the expression (number, register, device, etc.)
     if (expr.type !== "VariableName") {
@@ -474,11 +568,17 @@ export function transpile(ast, text) {
 
   function dirty(register) {
     // NOTE: Register is always a register
+    // No need to dirty the return register
+    if (register === RETURN_REGISTER) return;
     cache.dirty(register);
   }
 
-  function newTemp() {
-    return cache.newTemp();
+  function newTemp(useSavedCache = false) {
+    return cache.newTemp(useSavedCache);
+  }
+
+  function getReturnRegister() {
+    return { type: "Register", text: RETURN_REGISTER };
   }
 
   // Expressions
@@ -488,9 +588,22 @@ export function transpile(ast, text) {
     let op = expr.children[1];
     let right = expr.children[2];
 
+    // If the right expression contains a function call, we need
+    // to use saved registers to store the result of the lhs expression
+    const isDefinedCall = i => {
+      return i.type === "FunctionCall" && definedFns.has(i.children[0].text);
+    };
+
+    let rightContainsDefinedCall = findInstruction(right, isDefinedCall) !== null;
+
     // Compute left and right expressions if needed
     if (left.type !== "Number" && left.type !== "Register") {
-      left = processExpression(left);
+      if (rightContainsDefinedCall) {
+        let savedTemp = newTemp(true); // Use saved register
+        left = processExpression(left, savedTemp);
+      } else {
+        left = processExpression(left);
+      }
     }
 
     if (right.type !== "Number" && right.type !== "Register") {
@@ -748,9 +861,9 @@ export function transpile(ast, text) {
 
   function number(expr, outVar) {
     if (outVar) {
-      let register = cache.load(outVar);
+      let register = load(outVar);
       addInstruction(`move ${register} ${expr.text}`);
-      cache.dirty(register);
+      dirty(register);
     }
     
     return expr;
@@ -783,8 +896,67 @@ export function transpile(ast, text) {
     return value;
   }
 
+  function userDefinedFunctionCall(expr, outVar) {
+    const functionName = expr.children[0].text;
+    const params = [];
+    const tempVars = [];
+    const tempVals = [];
+
+    // Reserve temps for parameters first
+    for (let i = 2; i < expr.children.length - 1; i += 2) {
+      const param = expr.children[i];
+      const tempVar = newTemp();
+      const tempVal = get(tempVar);
+
+      params.push(param);
+      tempVars.push(tempVar);
+      tempVals.push(tempVal);
+    }
+
+    for (let i = 0; i < params.length; i++) {
+      const param = params[i];
+      const tempVar = tempVars[i];
+      const tempVal = tempVals[i];
+      const paramExpr = processExpression(param, tempVal);
+      const paramValue = get(paramExpr);
+      freeTemp(paramExpr);
+    }
+
+    for (let i = tempVars.length - 1; i >= 0; i--) {
+      const temp = tempVars[i];
+      freeTemp(temp);
+    }
+
+    // Move stack pointer to end of free space
+    // No need to add to stack pointer if offset is 0
+    if (cache.stack.pointer > 0) addInstruction(`add sp sp ${cache.stack.pointer}`);
+    
+    addInstruction("jal stepInto");
+    cache.stepInto();
+    addInstruction(`jal ${functionName}`);
+    cache.stepOut();
+    addInstruction("jal stepOut");
+
+    if (cache.stack.pointer > 0) addInstruction(`sub sp sp ${cache.stack.pointer}`);
+
+    if (!outVar) outVar = newTemp();
+
+    let register = load(outVar);
+
+    // Only move register if it's not the return register
+    if (register !== RETURN_REGISTER) {
+      addInstruction(`move ${register} ${RETURN_REGISTER}`);
+    }
+
+    return outVar;
+  }
+
   function functionCall(expr, outVar) {
     let functionName = expr.children[0].text;
+
+    if (definedFns.has(functionName)) {
+      return userDefinedFunctionCall(expr, outVar);
+    }
 
     if (!outVar) outVar = newTemp();
     
@@ -800,16 +972,9 @@ export function transpile(ast, text) {
       let slot = processExpression(expr.children[4]);
       let attribute = expr.children[6];
 
-      if (attribute.type !== "String") {
-        throw new CompilerError("Expected slot attribute to be a string");
-      }
-
-      // Remove quotes
-      let attributeName = attribute.text.slice(1, attribute.text.length - 1);
-
       freeTemp(slot);
       let register = load(outVar);
-      addInstruction(`ls ${register} ${device.text} ${slot.text} ${attributeName}`);
+      addInstruction(`ls ${register} ${device.text} ${slot.text} ${attribute.text}`);
       dirty(register);
 
       return outVar;
@@ -936,19 +1101,90 @@ export function transpile(ast, text) {
 
   // Statements
 
-  function functionDef(expr) {
+  function functionDef(expr, scope) {
     const functionName = expr.children[1].text;
-    const params = [];
+    const args = [];
+    const argNames = new Set();
+    const nextScope = createScope(scope);
 
-    for (let i = 3; i < expr.children.length - 4; i += 2) {
-      params.push(expr.children[i].text);
+    for (let i = 3; i < expr.children.length - 3; i += 2) {
+      if (argNames.has(expr.children[i].text)) {
+        throw new CompilerError(`Duplicate argument name: ${expr.children[i].text}`);
+      }
+
+      args.push(expr.children[i]);
+      argNames.add(expr.children[i].text);
+    }
+
+    if (args.length > TEMP_REGISTERS.length) {
+      throw new CompilerError(`Too many arguments (max ${TEMP_REGISTERS.length})`);
     }
 
     const body = expr.children[expr.children.length - 2];
 
-    addInstruction(`${functionName}:`);
+    // Push ra and pop ra are only necessary if there is a function call within the body
+    let firstFnCall = findInstructionParentIdx(body, i => i.type === "FunctionCall");
+    let hasFnCall = firstFnCall !== null;
+    nextScope.needsPopRa = hasFnCall;
 
-    // 
+    // Add function to defined functions
+    definedFns.add(functionName);
+
+    // Enter function
+    prependEnabled(true);
+    cache.stepInto();
+    addInstruction(`${functionName}:`);
+    if (hasFnCall) addInstruction(`push ra`);
+    
+    // Check if an argument is used after the function call
+    // const isArgUsedAferFnCall = arg => {
+    //   const statementsAfterFnCall = firstFnCall.parent.children.slice(firstFnCall.index + 1);
+    //   return statementsAfterFnCall.some(statement => {
+    //     return findInstruction(statement, i => {
+    //       // Use property to ensure we have found "arg" and not "var.arg" etc.
+    //       return i.type === "Property" && i.children[0].text === arg.text;
+    //     });
+    //   });
+    // };
+
+    // Load arguments
+    for (let i = 0; i < args.length; i++) {
+      const arg = args[i];
+
+      // TODO: Instead of just checking for function call, see if the variables
+      // are being used after the function call.
+      // These arguments need to be freed just before the function call
+      // The reason it was not done yet was because if the parameter replaces
+      // an argument used for the next parameters, an auxiliary register is needed.
+      if (!hasFnCall) {
+        cache.tempCache.assign(arg.text, `r${i}`);
+        continue;
+      }
+
+      // The argument is used so we need to store it in a saved register
+      const register = load(arg);
+      addInstruction(`move ${register} r${i}`);
+      dirty(register);
+    }
+
+    // Process body
+    processStatements(body.children, nextScope);
+
+    // Add jump at end if no return
+    if (body.children[body.children.length - 1].type !== "Return") {
+      if (hasFnCall) addInstruction("pop ra");
+      addInstruction("j ra");
+    }
+
+    cache.stepOut();
+    prependEnabled(false);
+  }
+
+  function returnStatement(statement, scope) {
+    const returnRegister = getReturnRegister();
+    const expr = processExpression(statement.children[1], returnRegister);
+    if (scope.needsPopRa) addInstruction("pop ra");
+    addInstruction("j ra");
   }
 
   function declaration(statement) {
@@ -1174,6 +1410,10 @@ export function transpile(ast, text) {
       return declaration(statement);
     }
 
+    if (statement.type === "Return") {
+      return returnStatement(statement, scope);
+    }
+
     if (statement.type === "DeviceDeclaration") {
       return deviceDeclaration(statement);
     }
@@ -1239,7 +1479,7 @@ export function transpile(ast, text) {
     }
 
     if (statement.type === "FunctionDef") {
-      return functionDef(statement);
+      return functionDef(statement, scope);
     }
 
     if (statement.type === "FunctionCall") {
@@ -1262,5 +1502,54 @@ export function transpile(ast, text) {
     gen = gen.replace(`end${index}:\n`, "");
   }
 
-  return gen.trim();
+  let finalGen = "";
+
+  if (prependGen) {
+    finalGen += "j ProgramStart\n";
+    if (!config.omitPrologue) finalGen += STEP_SUBROUTINES + "\n";
+    finalGen += prependGen.trim() + "\n";
+    finalGen += "ProgramStart:\n";
+  }
+
+  finalGen += gen.trim();
+
+  if (!config.keepLabels) {
+    finalGen = removeLabels(finalGen);
+  }
+
+  return finalGen;
+}
+
+function removeLabels(output) {
+  // Find all the line numbers for each label
+  const labels = new Map();
+  let lines = output.split("\n");
+
+  for (let i = 0; i < lines.length; i++) {
+    const instruction = lines[i].trim();
+
+    if (instruction.endsWith(":")) {
+      const label = instruction.substring(0, instruction.length - 1).trim();
+      labels.set(label, i); // Starts at line 0
+
+      // Remove the instruction
+      lines.splice(i--, 1);
+    }
+  }
+
+  // Replace all instances of used labels with the line number
+  for (let i = 0; i < lines.length; i++) {
+    const instruction = lines[i].trim();
+    const tokens = instruction.split(" ");
+    
+    for (let j = 0; j < tokens.length; j++) {
+      if (labels.has(tokens[j])) {
+        tokens[j] = labels.get(tokens[j]);
+      }
+    }
+
+    lines[i] = tokens.join(" ");
+  }
+
+  return lines.join("\n");
 }

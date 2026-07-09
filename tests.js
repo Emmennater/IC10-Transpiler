@@ -1,4 +1,6 @@
-import { transpile } from "./compiler.js";
+import assert from "node:assert/strict";
+import { describe, it } from "mocha";
+import { compile } from "./compiler.js";
 import { getAST } from "./helper.js";
 
 const cases = `
@@ -44,7 +46,7 @@ move r12 3
 move r13 4
 move r14 5
 move r15 6
-put db 0 r10
+put db sp r10
 move r10 7
 
 # Loops
@@ -226,19 +228,19 @@ lbn r10 analyzer HASH("pipe0") Pressure Average
 # Register and device backwards compatibility
 device larre = d0
 let x
-ls(x, larre, 255, damage)
+ls(x, larre, 255, Quantity)
 
 alias larre d0
-ls r10 larre 255 damage
+ls r10 larre 255 Quantity
 
 # Load slot function
 device larre = d0
 define slot = 255
-let x = loadSlot(larre, slot, "damage")
+let x = loadSlot(larre, slot, Quantity)
 
 alias larre d0
 define slot 255
-ls r10 larre slot damage
+ls r10 larre slot Quantity
 
 # Set slot function and string definitions
 define iron = ItemIronIngot
@@ -314,6 +316,107 @@ move r10 0
 add r10 r10 1
 sub r10 r10 1
 move r11 r10
+
+# Functions
+fn foo(a, b)
+  return a + b
+end
+x = foo(1, 2)
+
+j ProgramStart
+foo:
+add r9 r0 r1
+j ra
+ProgramStart:
+move r0 1
+move r1 2
+jal stepInto
+jal foo
+jal stepOut
+move r10 r9
+
+# Recursion
+fn fib(n)
+  if n <= 1 then
+    return n
+  end
+  return fib(n - 1) + fib(n - 2)
+end
+x = fib(6)
+
+j ProgramStart
+fib:
+push ra
+move r10 r0
+sle r0 r10 1
+beqz r0 end2
+move r9 r10
+pop ra
+j ra
+end2:
+sub r0 r10 1
+jal stepInto
+jal fib
+jal stepOut
+move r11 r9
+sub r0 r10 2
+jal stepInto
+jal fib
+jal stepOut
+move r0 r9
+add r9 r11 r0
+pop ra
+j ra
+ProgramStart:
+move r0 6
+jal stepInto
+jal fib
+jal stepOut
+move r10 r9
+
+# Functions and a spilling stack
+fn foo(a, b, c)
+  return a + b + c
+end
+let a = 1
+let b = 2
+let c = 3
+let d = 4
+let e = 5
+let f = 6
+let g = 7
+let h = foo(a, b, c)
+let i = h + g
+
+j ProgramStart
+foo:
+add r3 r0 r1
+add r9 r3 r2
+j ra
+ProgramStart:
+move r10 1
+move r11 2
+move r12 3
+move r13 4
+move r14 5
+move r15 6
+put db sp r10
+move r10 7
+get r3 db sp
+move r0 r3
+move r1 r11
+move r2 r12
+add sp sp 1
+jal stepInto
+jal foo
+jal stepOut
+sub sp sp 1
+add r8 sp 1
+put db r8 r13
+move r13 r9
+add r8 sp 2
+put db r8 r14
+add r14 r13 r10
 `;
 
 const codeExamples = {
@@ -359,7 +462,11 @@ loop
   larre.Setting = target
   jal wait
   loop
-    if loadSlot(larre, 255, "Seeding") != seeds || loadSlot(larre, 255, "Mature") == 0 || loadSlot(larre, 0, "Quantity") == stackSize then
+    if (
+      loadSlot(larre, 255, Seeding) != seeds ||
+      loadSlot(larre, 255, Mature) == 0 ||
+      loadSlot(larre, 0, Quantity) == stackSize
+    ) then
       break
     end
     larre.Activate = 1
@@ -370,7 +477,7 @@ loop
     break
   end
 end
-if loadSlot(larre, 0, "Quantity") > 0 then
+if loadSlot(larre, 0, Quantity) > 0 then
   larre.Setting = dropPos
   jal wait
   larre.Activate = 1
@@ -392,7 +499,7 @@ larre.Setting = pickupPos
 jal wait
 larre.Activate = 1
 jal wait
-if loadSlot(larre, 0, "Quantity") == 0 then
+if loadSlot(larre, 0, Quantity) == 0 then
   vending.RequestHash = plantName
   sleep 1
   larre.Activate = 1
@@ -402,7 +509,7 @@ target = plants
 loop
   larre.Setting = target
   jal wait
-  if loadSlot(larre, 255, "Occupied") == 0 then
+  if loadSlot(larre, 255, Occupied) == 0 then
     larre.Activate = 1
     jal wait
   end
@@ -411,7 +518,7 @@ loop
     break
   end
 end
-if loadSlot(larre, 0, "Quantity") > 0 then
+if loadSlot(larre, 0, Quantity) > 0 then
   larre.Setting = dropPos
   jal wait
   larre.Activate = 1
@@ -547,33 +654,46 @@ function format(char) {
   return `'${char.replace("\n", "\\n")}'`;
 }
 
-export function runTests() {
-  let parsedCases = [];
+function getTestCases() {
+  const parsedCases = [];
+
   const matchInput = /#[^\n]*\n/g;
   const testNames = cases.match(matchInput).map(c => c.substring(1).trim());
 
-  cases.split(matchInput).map(c => {
+  cases.split(matchInput).forEach(c => {
     if (c.trim() === "") return;
+
     let [input, output] = c.split("\n\n");
-    input = input.trim();
-    output = output.trim();
-    parsedCases.push([input, output]);
+
+    parsedCases.push({
+      name: testNames[parsedCases.length],
+      input: input.trim(),
+      output: output.trim()
+    });
   });
 
-  // Add code examples
-  for (let example in codeExamples) {
-    testNames.push(`Code example ${example}`);
-    parsedCases.push([
-      codeExamples[example][0].trim(),
-      codeExamples[example][1].trim()
-    ]);
+  for (const example in codeExamples) {
+    parsedCases.push({
+      name: `Code example ${example}`,
+      input: codeExamples[example][0].trim(),
+      output: codeExamples[example][1].trim()
+    });
   }
 
+  return parsedCases;
+}
+
+function runTests() {
+  const parsedCases = getTestCases();
+  const config = {
+    omitPrologue: true,
+    keepLabels: true
+  };
+
   for (let i = 0; i < parsedCases.length; i++) {
-    let [input, output] = parsedCases[i];
-    const name = testNames[i];
+    let { input, output, name } = parsedCases[i];
     const ast = getAST(input);
-    const ic10 = transpile(ast);
+    const ic10 = compile(ast, config);
 
     // Assert match
     let passed = true;
@@ -604,3 +724,18 @@ export function runTests() {
     }
   }
 }
+
+describe("Compiler", () => {
+  const config = {
+    omitPrologue: true,
+    keepLabels: true
+  };
+
+  for (const test of getTestCases()) {
+    it(test.name, () => {
+      const ast = getAST(test.input);
+      const actual = compile(ast, config);
+      assert.strictEqual(actual, test.output);
+    });
+  }
+});

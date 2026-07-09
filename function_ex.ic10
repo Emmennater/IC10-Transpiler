@@ -1,0 +1,63 @@
+# fn bar(a, b)
+#   c = a + 1
+#   d = b - 1
+#   return c * d
+# end
+# fn foo(a, b, c)
+#   x = a + bar(b, a)
+#   y = b + bar(a, c)
+#   return y - x
+# end
+# x = foo(1, 2, 3) = 5
+
+move r0 1
+move r1 2
+move r2 3
+jal foo
+move r10 r9
+yield
+
+foo:
+push ra
+move r10 r0
+move r11 r1
+move r12 r2
+move r0 r11
+move r1 r10
+jal stepIn
+jal bar
+jal stepOut
+add r13 r10 r9
+move r0 r10
+move r1 r12
+jal stepIn
+jal bar
+jal stepOut
+add r14 r11 r9
+sub r9 r14 r13
+pop ra
+j ra
+
+bar:
+push ra
+move r10 r0
+move r11 r1
+add r12 r10 1
+sub r13 r11 1
+mul r9 r12 r13
+pop ra
+j ra
+
+stepIn:
+move r8 10
+push rr8
+add r8 r8 1
+brne r8 16 -2
+j ra
+
+stepOut:
+move r8 15
+pop rr8
+sub r8 r8 1
+brne r8 9 -2
+j ra
