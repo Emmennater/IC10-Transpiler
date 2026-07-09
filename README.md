@@ -37,7 +37,7 @@ The bottom example is the compiled output in `IC10`.
 - [Supported Operators](#supported-operators)
 
 ### Declaring Variables
-`let` is currently just syntax sugar and only used to define variables without giving a value. There are no variable scopes at the moment. `numbers` and `strings` are the only thing that can be assigned to variables.
+`let` is used to define variables and does not require an initial value. `numbers` are the only thing that can be assigned to variables. `strings` will be automatically hashed. Registers 10-15 are used for variables.
 ```
 let pi
 let y = -2
@@ -50,8 +50,24 @@ move r10 3.14
 move r12 HASH("Hello World!")
 ```
 You can still technically use all the registers, but this may interfere with how variables are used by the compiler *(not recommended)*.
+#### Variable Scopes
+A variable that was defined inside of a scope will be freed as soon as the scope ends.
+```
+loop
+  let x = 1
+end
+x = 2  <-- Error: x is not defined
+```
+You cannot define a variable with the same name in a shared scope.
+```
+let x = 1
+let x = 2  <-- Error: x was already defined
+loop
+  let x = 3  <-- Error: x was already defined
+end
+```
 ### Using Variables
-Registers 10-15 are used for variables.
+Once a variable has been defined it can be used.
 ```
 let x = 1
 let y = x
@@ -86,8 +102,8 @@ move r11 r10
 ```
 ### Booleans
 ```
-x = true
-y = false
+let x = true
+let y = false
 ```
 ```
 move r10 1
@@ -145,7 +161,7 @@ end
 ```
 Repeat until loops:
 ```
-x = 0
+let x = 0
 repeat
   x = x + 1
 until x > 10
@@ -205,7 +221,7 @@ You can get/set device logic types using dot notation.
 ```
 device pump = d0
 pump.Setting = 1
-x = pump.On
+let x = pump.On
 ```
 ```
 alias pump d0
@@ -215,7 +231,7 @@ l r10 pump On
 Referencing channels can be done similarly
 ```
 device pump = d0
-x = pump:0.Channel0
+let x = pump:0.Channel0
 d0:0.Channel0 = 1
 ```
 ```
@@ -232,7 +248,7 @@ define y = 100
 define logicType = Setting
 
 # Count how many lights are on
-x = Sum(light.On)
+let x = Sum(light.On)
 
 # Turn on all of your wall lights 
 light.On = active
@@ -253,7 +269,7 @@ Reading from and writing to devices with specific names
 define light = "StructureWallLight"
 
 # Count how many lights are on inside
-x = Sum(light.Inside.On)
+let x = Sum(light.Inside.On)
 
 # Turn on all the lights inside
 light.Inside.On = true
@@ -286,7 +302,7 @@ Aggregator functions:
 Everything else is converted directly into an IC10 instruction.
 ```
 # Take the average of a logic type for a device group
-x = Average(deviceHash.LogicType) # (deviceHash.logicType)
+let x = Average(deviceHash.LogicType) # (deviceHash.logicType)
 ```
 ```
 lb r10 HASH("deviceHash") LogicType Average
@@ -295,7 +311,7 @@ String parameters can be used to specify an IC10 variable.
 loadSlot is unique in that the return value can be assigned to a variable directly without using a parameter.
 ```
 # Load the quantity at slot 0 for device d0
-y = loadSlot(d0, 0, Quantity) # (device, slot index, logic type)
+let y = loadSlot(d0, 0, Quantity) # (device, slot index, logic type)
 ```
 ```
 ls r10 d0 0 Quantity
@@ -313,12 +329,13 @@ ss d0 0 PrefabHash iron
 ```
 ### Defining Functions
 After some work, we finally got our own functions with their own scope!
+It doesn't matter where a function is defined, it will always appear at the top.
 Here is how you use them:
 ```
 fn foo(a, b)
   return a + b
 end
-x = foo(1, 2)
+let x = foo(1, 2)
 ```
 When you use functions you will see some extra code at the top of your program.
 This is to handle the use of stack when entering/leaving function scope.
@@ -330,14 +347,14 @@ fn fib(n)
   end
   return fib(n - 1) + fib(n - 2)
 end
-x = fib(6)
+let x = fib(6)
 ```
 Keep in mind the overhead when using functions. It isn't too much when you just have
 a single function, but when you nest them it can grow to be quite a bit!
 ### Using IC10 Functions/Variables in the High-Level Language
 Since this high level language is fully backwards compatible with IC10, this means you can use functions and variables from the standard IC10 language directly inside your code! Functions are used in place of instructions. Just pass the parameters you would normally. You may be wondering how to write IC10 without using the registers. The solution is to just use the variable names and the compiler will substitute it with the register that it has been assigned.
 ```
-x = DisplayMode.Seconds
+let x = DisplayMode.Seconds
 top:
 sleep x
 j top

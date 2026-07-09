@@ -118,8 +118,8 @@ s d0 ClearMemory 1
 
 # Reading from devices
 device machine = d0
-x = machine.ClearMemory
-let x = machine.Setting
+let x = machine.ClearMemory
+x = machine.Setting
 let y = d0.Pressure
 
 alias machine d0
@@ -262,7 +262,7 @@ yield
 end1:
 
 # Using IC10 globals
-x = DisplayMode.Seconds
+let x = DisplayMode.Seconds
 sleep(x)
 
 move r10 DisplayMode.Seconds
@@ -278,7 +278,7 @@ yield
 end1:
 
 # While loop
-x = 0
+let x = 0
 while x < 10 do
   yield
   x = x + 1
@@ -294,7 +294,7 @@ j scope1
 end1:
 
 # Repeat until loop
-x = 0
+let x = 0
 repeat
   yield
   x = x + 1
@@ -321,7 +321,7 @@ move r11 r10
 fn foo(a, b)
   return a + b
 end
-x = foo(1, 2)
+let x = foo(1, 2)
 
 j ProgramStart
 foo:
@@ -342,7 +342,7 @@ fn fib(n)
   end
   return fib(n - 1) + fib(n - 2)
 end
-x = fib(6)
+let x = fib(6)
 
 j ProgramStart
 fib:
@@ -420,7 +420,7 @@ add r14 r13 r10
 
 # Reading and writing to channels
 device pump = d0
-x = pump:0.Channel0
+let x = pump:0.Channel0
 d0:0.Channel0 = 1
 
 alias pump d0

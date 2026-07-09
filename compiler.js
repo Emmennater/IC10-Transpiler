@@ -124,6 +124,7 @@ class LRUCache {
     this.dirtyReg = new Set(); // Registers that need to be saved
     this.registers = registers;
     this.recentRegisters = registers.slice().sort(compareRegisters); // Most recent stored at the beginning
+    this.definedVars = new Set();
   }
 
   used(register) {
@@ -181,13 +182,17 @@ class LRUCache {
   }
 
   load(varName) {
-    
     let register = this.var2reg.get(varName);
-    
+
     if (register !== undefined) {
       // Register hit
       this.used(register);
       return register;
+    }
+
+    // Check if the variable has been created
+    if (!this.isDefined(varName)) {
+      throw new CompilerError(`${varName} is not defined`);
     }
 
     register = this.lru(varName);
@@ -204,9 +209,13 @@ class LRUCache {
       return register;
     }
 
+    // Check if the variable has been created
+    if (!this.isDefined(varName)) {
+      throw new CompilerError(`${varName} is not defined`);
+    }
+
     register = this.lru(varName);
 
-    // Check if the variable has been created
     if (!this.stack.has(varName)) {
       return register;
     }
@@ -236,6 +245,22 @@ class LRUCache {
     this.reg2var.delete(register);
     this.dirtyReg.delete(register);
     this.notUsed(register);
+    this.definedVars.delete(varName);
+  }
+
+  isDefined(varName) {
+    // Exception for temporary variables
+    if (varName.startsWith("*") || varName.startsWith("v*")) return true;
+
+    return this.has(varName) || this.definedVars.has(varName);
+  }
+
+  define(varName) {
+    if (this.isDefined(varName)) {
+      throw new CompilerError(`${varName} was already defined`);
+    }
+
+    this.definedVars.add(varName);
   }
 
   assign(varName, register) {
@@ -292,8 +317,9 @@ class Cache {
   }
 
   get(varExpr) {
+    
     let varName = this.nameOf(varExpr);
-
+    
     if (this.tempCache.has(varName)) {
       return this.tempCache.get(varName);
     } else if (this.savedCache.has(varName)) {
@@ -340,6 +366,14 @@ class Cache {
     } else {
       throw new CompilerError("Register not found");
     }
+  }
+
+  define(varName) {
+    if (this.isTemp(varName)) {
+      throw new CompilerError(`Expected non-temporary variable, got: ${varName}`);
+    }
+
+    this.savedCache.define(varName);
   }
 
   newTemp(useSavedCache = false) {
@@ -394,6 +428,7 @@ export function compile(ast, config = {}) {
     return {
       index: nScopes++,
       loopIndex: 0,
+      variables: new Set()
     };
   }
 
@@ -401,7 +436,16 @@ export function compile(ast, config = {}) {
     return {
       ...scope,
       index: nScopes++,
+      scopeVariables: new Set(scope.variables),
+      variables: new Set()
     };
+  }
+
+  function deleteScope(scope) {
+    // Remove variables from scope
+    for (let variable of scope.variables) {
+      free(variable);
+    }
   }
 
   function prependInstruction(instruction) {
@@ -523,6 +567,14 @@ export function compile(ast, config = {}) {
 
   // Memory
 
+  function free(expr) {
+    if (expr.type !== "VariableName") {
+      throw new CompilerError(`Expected variable name, got: ${expr.type}`);
+    }
+
+    cache.free(expr);
+  }
+
   function freeTemp(expr) {
     if (expr.type === "VariableName" && cache.isTemp(expr.text)) {
       cache.free(expr);
@@ -580,6 +632,10 @@ export function compile(ast, config = {}) {
 
   function newTemp(useSavedCache = false) {
     return cache.newTemp(useSavedCache);
+  }
+
+  function define(varName) {
+    cache.define(varName);
   }
 
   function getReturnRegister() {
@@ -1193,8 +1249,9 @@ export function compile(ast, config = {}) {
         cache.tempCache.assign(arg.text, `r${i}`);
         continue;
       }
-
+      
       // The argument is used so we need to store it in a saved register
+      define(arg.text);
       const register = load(arg);
       addInstruction(`move ${register} r${i}`);
       dirty(register);
@@ -1220,14 +1277,26 @@ export function compile(ast, config = {}) {
     addInstruction("j ra");
   }
 
-  function declaration(statement) {
+  function declaration(statement, scope) {
+    const varExpr = statement.children[1];
+    const valueExpr = statement.children[3];
+    const varName = varExpr.text;
+
+    // Add the variable to the scope
+    scope.variables.add(varExpr);
+    define(varName);
+
     // Declaring a variable only
     if (statement.children.length === 2) {
-      load(statement.children[1]);
+      load(varExpr);
       return;
     }
 
-    processExpression(statement.children[3], statement.children[1]);
+    if (scope.variables.has(varName)) {
+      throw new CompilerError(`Duplicate variable name: ${varName}`);
+    }
+    
+    processExpression(valueExpr, varExpr);
   }
 
   function assignment(statement) {
@@ -1296,6 +1365,8 @@ export function compile(ast, config = {}) {
     processStatements(statements, nextScope);
     addInstruction(`j scope${nextScope.index}`);
     addInstruction(`end${nextScope.index}:`);
+
+    deleteScope(nextScope);
   }
 
   function whileExpr(statement, scope) {
@@ -1315,6 +1386,8 @@ export function compile(ast, config = {}) {
     processStatements(statements, nextScope);
     addInstruction(`j scope${nextScope.index}`);
     addInstruction(`end${nextScope.index}:`);
+
+    deleteScope(nextScope);
   }
 
   function repeatUntilExpr(statement, scope) {
@@ -1332,6 +1405,8 @@ export function compile(ast, config = {}) {
     
     freeTemp(conditionExpr);
     addInstruction(`beqz ${conditionReg.text} scope${nextScope.index}`);
+
+    deleteScope(nextScope);
   }
 
   function ifExpr(statement, scope) {
@@ -1347,7 +1422,8 @@ export function compile(ast, config = {}) {
     }
 
     let currentScope = createScope(scope);
-    currentScope.endif = currentScope.index;
+    let endif = currentScope.index;
+    currentScope.endif = endif;
     let nextScope = null;
 
     for (let i = 0; i < statement.children.length; i++) {
@@ -1356,13 +1432,15 @@ export function compile(ast, config = {}) {
       if (childStatement.type === "Else") {
         processStatements(childStatement.children.slice(1), currentScope);
         addInstruction(`end${currentScope.endif}:`);
+        deleteScope(nextScope);
         break;
       }
 
       let nextLabel = `end${currentScope.endif}`;
 
       if (statement.children[i + 1].type !== "end") {
-        nextScope = createScope(currentScope);
+        nextScope = createScope(scope);
+        nextScope.endif = endif;
         nextLabel = `scope${nextScope.index}`;
       }
 
@@ -1380,9 +1458,11 @@ export function compile(ast, config = {}) {
       if (statement.children[i + 1].type === "end") {
         // End of the if/elif/else statement
         addInstruction(`end${currentScope.endif}:`);
+        deleteScope(currentScope);
         break;
       } else {
         addInstruction(`j end${currentScope.endif}`);
+        deleteScope(currentScope);
         addInstruction(`scope${nextScope.index}:`);
         currentScope = nextScope;
       }
@@ -1440,7 +1520,7 @@ export function compile(ast, config = {}) {
     CompilerError.to = statement.to;
 
     if (statement.type === "Declaration") {
-      return declaration(statement);
+      return declaration(statement, scope);
     }
 
     if (statement.type === "Return") {
