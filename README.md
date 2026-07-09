@@ -309,8 +309,8 @@ fn foo(a, b)
 end
 x = foo(1, 2)
 ```
-When you use functions you will see some extra code at the top of your program
-this is to handle the use of stack when entering/leaving function scope.
+When you use functions you will see some extra code at the top of your program.
+This is to handle the use of stack when entering/leaving function scope.
 You can also try your hand at some recursive functions!
 ```
 fn fib(n)
