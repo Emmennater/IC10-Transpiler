@@ -217,7 +217,7 @@ sbn HASH("StructurePipeAnalyzer") HASH("pipe0") Setting 1
 lbn r10 HASH("StructurePipeAnalyzer") HASH("pipe0") Pressure Average
 
 # Definitions
-define analyzer = StructurePipeAnalyzer
+define analyzer = "StructurePipeAnalyzer"
 analyzer.pipe0.Setting = 1
 let x = Average(analyzer.pipe0.Pressure)
 
@@ -243,8 +243,8 @@ define slot 255
 ls r10 larre slot Quantity
 
 # Set slot function and string definitions
-define iron = ItemIronIngot
-define type = "PrefabHash"
+define iron = "ItemIronIngot"
+define type = PrefabHash
 setSlot(d0, 0, type, iron)
 
 define iron HASH("ItemIronIngot")
@@ -434,8 +434,8 @@ const codeExamples = {
 device larre = d0
 device vending = d1
 device importBin = d2
-define plantSeeds = SeedBag_Potato
-define plantName = ItemPotato
+define plantSeeds = "SeedBag_Potato"
+define plantName = "ItemPotato"
 define stackSize 20
 define plants = 13
 define dropPos = 14

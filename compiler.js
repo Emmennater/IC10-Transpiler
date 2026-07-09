@@ -776,9 +776,15 @@ export function compile(ast, config = {}) {
 
       if (outVar) {
         if (value.type === "String") {
-          // Hash the string
           let register = load(outVar);
-          addInstruction(`move ${register} HASH(${value.text})`);
+          addInstruction(`move ${register} ${variableName}`);
+          dirty(register);
+          return varExpr;
+        }
+
+        if (value.type === "Property") {
+          let register = load(outVar);
+          addInstruction(`move ${register} ${value.text}`);
           dirty(register);
           return varExpr;
         }
@@ -789,7 +795,9 @@ export function compile(ast, config = {}) {
         return varExpr;
       }
 
-      if (value.type === "String") return value;
+      if (value.type === "Property") {
+        return { type: "Macro", text: value.text };
+      }
 
       return { type: "Macro", text: expr.text };
     }
@@ -1396,8 +1404,8 @@ export function compile(ast, config = {}) {
       addInstruction(`define ${variableName} ${value.text}`);
     } else if (value.type === "Bool") {
       addInstruction(`define ${variableName} ${value.text === "true" ? "1" : "0"}`);
-    } else if (value.type !== "String") {
-      addInstruction(`define ${variableName} HASH("${value.text}")`);
+    } else if (value.type === "String") {
+      addInstruction(`define ${variableName} HASH(${value.text})`);
     }
 
     defined.set(variableName, value);

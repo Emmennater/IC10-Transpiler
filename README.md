@@ -226,10 +226,10 @@ s d0:0 Channel0 1
 ### Using Definitions
 Definitions let you assign a number or a string to an identifier. A list of all aggregator functions (like Sum) can be found [here](#functions).
 ```
-define light = StructureWallLight
+define light = "StructureWallLight"
 define active = true
 define y = 100
-define logicType = "Setting"
+define logicType = Setting
 
 # Count how many lights are on
 x = Sum(light.On)
@@ -250,7 +250,7 @@ s db Setting y
 ```
 Reading from and writing to devices with specific names
 ```
-define light = StructureWallLight
+define light = "StructureWallLight"
 
 # Count how many lights are on inside
 x = Sum(light.Inside.On)
@@ -269,16 +269,16 @@ define str = "Hello World!"
 let s = str
 ```
 ```
-move r10 HASH("Hello World!")
+define str HASH("Hello World!")
+move r10 str
 ```
-It is the same behavior as not using quotes.
+Without quotes it will just copy the identifier you wrote.
 ```
 define str = HelloWorld
 let s = str
 ```
 ```
-define str HASH("HelloWorld")
-move r10 str
+move r10 HelloWorld
 ```
 ### Calling Functions
 Aggregator functions:
@@ -303,8 +303,8 @@ ls r10 d0 0 Quantity
 Example using setSlot:
 ```
 # Program a sorter
-define iron = ItemIronIngot
-define type = "PrefabHash"
+define iron = "ItemIronIngot"
+define type = PrefabHash
 setSlot(d0, 0, type, iron)
 ```
 ```
