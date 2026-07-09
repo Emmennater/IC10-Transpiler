@@ -38,9 +38,8 @@ function generateDefaultScriptName(boilerplate = false) {
     ...getScriptNames()
   ]);
 
-  let i = 0;
-  while (true) {
-    const name = i === 0 ? prefix : `${prefix}-${i++}`;
+  for (let i = 0; true; i++) {
+    const name = i === 0 ? prefix : `${prefix}-${i}`;
     if (otherScripts.has(name)) continue;
     return name;
   }
