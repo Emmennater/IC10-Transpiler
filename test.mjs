@@ -142,7 +142,7 @@ const cases = [
       "move b 1",
       "j endif0",
       "if0elif0:",
-      "bgt r0 -1 else0", // bgt: branch if greater than
+      "bge r0 -1 else0", // bge: branch if greater than or equal (negation of x < -1)
       "move b 2",
       "j endif0",
       "else0:",
@@ -161,7 +161,7 @@ const cases = [
       "move r0 a",
       "blez r0 endif0", // blez: branch if less than or equal to zero
       "move b 1",
-      "end0:",
+      "endif0:",
     ].join("\n"),
   },
   {
@@ -192,8 +192,8 @@ const cases = [
       "move r1 b",
       "add r0 r0 r1",
       "bgt r0 2 endif0", // Only the else branch is kept
-      "mul r0 r0 -1",
-      "end0:",
+      "sub r0 0 r0", // Canonical unary minus
+      "endif0:",
       "move c r0", // x is used to update c
     ].join("\n"),
   },
@@ -249,8 +249,8 @@ const cases = [
       "bnez r0 endif0",
       "move b 2", // else branch is kept to update b
       "endif0:",
-      "move a 3"
-    ],
+      "move a 3",
+    ].join("\n"),
   },
   {
     "name": "if statement variables going out of scope",
