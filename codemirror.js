@@ -119,9 +119,10 @@ const lang = LRLanguage.define({
   parser: parser.configure({
     props: [
       styleTags({
-        "AddOp MulOp CompareOp LogicAnd LogicOr ParenParenLeft ParenRight Assign UnaryOp \
+        "AddOp MulOp CompareOp LogicAnd LogicOr ParenLeft ParenRight Assign UnaryOp \
         UnaryAdd": t.operator,
-        "let if then elif else end": t.keyword,
+        "let if then elif else end loop while do repeat until break continue": t.keyword,
+        "Instruction": t.function(t.variableName),
         Number: t.number,
         Bool: t.bool,
         Comment: t.comment,

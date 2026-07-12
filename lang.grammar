@@ -7,7 +7,10 @@ kw_<term> { @specialize<identifier, term> }
 
 block { statement* }
 
-statement { Declaration | Assignment | IfExpr }
+statement {
+  Declaration | Assignment | IfExpr | LoopExpr | WhileExpr | RepeatUntilExpr |
+  kw<"break"> | kw<"continue"> | Instruction
+}
 
 Declaration { kw<"let"> VariableName (Assign expression)? }
 
@@ -20,6 +23,14 @@ ElseIf { kw<"elif"> expression kw<"then"> block }
 Else { kw<"else"> block }
 
 IfExpr { If ElseIf* Else? kw<"end"> }
+
+LoopExpr { kw<"loop"> block kw<"end"> }
+
+WhileExpr { kw<"while"> expression kw<"do"> block kw<"end"> }
+
+RepeatUntilExpr { kw<"repeat"> block kw<"until"> expression }
+
+Instruction { kw_<"yield"> | kw_<"sleep"> expression }
 
 expression { Number | Bool | VariableName | Parens | UnaryOp | BinaryOp }
 

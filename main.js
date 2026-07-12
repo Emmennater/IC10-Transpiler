@@ -12,7 +12,8 @@ function run() {
 
   let ic10;
   try {
-    ic10 = compile(getAST(txt));
+    let ast = getAST(txt);
+    ic10 = compile(ast);
   } catch (e) {
     if (e instanceof CompileError) {
       updateTextEditor(output, `# ${e.message}`);

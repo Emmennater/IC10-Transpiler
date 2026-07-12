@@ -287,6 +287,9 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
    * allocation happens later over the whole program.
    */
   function pressure(node: SyntaxNode): number {
+    // Anything that folds to a constant costs zero registers, regardless of
+    // how deeply nested (e.g. -5, 2 + 3, or a variable known to hold 5).
+    if (foldExpression(node)) return 0;
     switch (node.type) {
       case "Number":
       case "Bool":

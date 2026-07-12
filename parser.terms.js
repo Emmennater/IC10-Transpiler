@@ -27,4 +27,15 @@ export const
   elif = 25,
   Else = 26,
   _else = 27,
-  end = 28
+  end = 28,
+  LoopExpr = 29,
+  loop = 30,
+  WhileExpr = 31,
+  _while = 32,
+  _do = 33,
+  RepeatUntilExpr = 34,
+  repeat = 35,
+  until = 36,
+  _break = 37,
+  _continue = 38,
+  Instruction = 39
