@@ -17,13 +17,21 @@ h1 {
   width: 100%;
   font-family: monospace;
   font-weight: normal;
-  color: #e0e0e0;
+  color: #858585;
   border-bottom: 1px solid #535964;
   user-select: none;
 }
 
 .title {
   margin-left: 10px;
+}
+
+.title span {
+  color: #ff7b72;
+}
+
+.title.ic10 {
+  color: #D2A8FF;
 }
 
 #stats {
@@ -92,4 +100,8 @@ vbox {
   align-items: center;
   height: 100%;
   min-width: 0;
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
 }
