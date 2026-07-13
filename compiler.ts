@@ -185,6 +185,9 @@ type FnInfo = {
   paramVregs: number[] | null;
   retVreg: number | null;
   lowered: Inst[] | null;
+  // Names referenced/assigned by the body and its callees (syntactic)
+  varRefs: Set<string> | null;
+  varWrites: Set<string> | null;
 };
 
 /** Metadata for one lowered if/elif/else, used by branch simplification. */
@@ -211,8 +214,22 @@ type LoopRegion = {
   bodyTo: number;
 };
 
-export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_ORDER): string {
+type Config = {
+  removeLabels: boolean;
+  registerOrder: number[];
+};
+
+const DEFAULT_CONFIG: Config = {
+  removeLabels: false,
+  registerOrder: VAR_REGISTER_ORDER
+};
+
+export function compile(ast: SyntaxNode,
+  config: Config = DEFAULT_CONFIG
+): string {
   const source = ast.text;
+  const removeLabels = config.removeLabels ?? DEFAULT_CONFIG.removeLabels;
+  const registerOrder = config.registerOrder ?? DEFAULT_CONFIG.registerOrder;
 
   // The editor gutter is 0-based, so error lines are too.
   function lineOf(node: SyntaxNode): number {
@@ -313,8 +330,10 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
     for (let i = scopes.length - 1; i >= 0; i--) {
       const symbol = scopes[i].get(name);
       if (symbol) {
-        // Caller variables are not visible inside a function body
-        if ((symbol.kind === "var" || symbol.kind === "alias") && i < functionScopeBase) return null;
+        // Caller variables are not visible inside a function body —
+        // except top-level globals, which functions may read and write
+        // through the global's home register.
+        if ((symbol.kind === "var" || symbol.kind === "alias") && i < functionScopeBase && i !== 0) return null;
         return symbol;
       }
     }
@@ -581,6 +600,12 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
       if (!fn.lowered) lowerFunction(fn, node);
       args.forEach((a, i) => emit({ op: "movev", dest: fn.paramVregs![i], src: a, node }));
       emit({ op: "jal", target: fn.name, node });
+      // Globals the function assigns are no longer compile-time constants
+      for (const name of fnVarRefs(fn).writes) {
+        const symbol = scopes[0].get(name);
+        if (symbol?.kind !== "var" || symbol.state.home === null) continue;
+        symbol.state.value = { kind: "vreg", id: symbol.state.home };
+      }
       if (!wantValue) return null;
       // Copy the result out so a later call cannot clobber it; the copy
       // vanishes when the allocator gives both sides the same register.
@@ -898,23 +923,26 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
     state.maybe = false;
   }
 
-  /** Collect assignment target names inside a block (including nested constructs). */
+  /**
+   * Collect assignment target names inside a block, including nested
+   * constructs and — since calls can write globals — the (transitive)
+   * write sets of every function called in it.
+   */
   function collectAssignedNames(block: SyntaxNode[], out: Set<string>) {
-    for (const statement of block) {
-      if (statement.type === "Assignment") {
+    const walk = (node: SyntaxNode) => {
+      if (node.type === "Assignment") {
         // Only plain variable targets; device writes need no merge handling
-        const target = kids(statement)[0];
+        const target = kids(node)[0];
         if (target?.type === "VariableName") out.add(target.text);
-      } else if (statement.type === "IfExpr") {
-        for (const part of kids(statement)) {
-          if (part.type === "If" || part.type === "ElseIf" || part.type === "Else") {
-            collectAssignedNames(blockOf(part), out);
-          }
-        }
-      } else if (statement.type === "LoopExpr" || statement.type === "WhileExpr" || statement.type === "RepeatUntilExpr") {
-        collectAssignedNames(blockOf(statement), out);
       }
-    }
+      if (node.type === "FunctionCall") {
+        const callee = fnTable.get(kids(node)[0]?.text ?? "");
+        if (callee) for (const name of fnVarRefs(callee).writes) out.add(name);
+      }
+      if (node.type === "FunctionDef") return; // nested defs error elsewhere
+      for (const child of node.children) walk(child);
+    };
+    for (const statement of block) walk(statement);
   }
 
   /** Statement children between two keyword tokens (either side optional). */
@@ -1284,6 +1312,8 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
           paramVregs: null,
           retVreg: null,
           lowered: null,
+          varRefs: null,
+          varWrites: null,
         });
         registeredFnNodes.add(statement);
       }
@@ -1300,6 +1330,49 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
       for (const child of node.children) countIn(child);
     };
     countIn(ast);
+  }
+
+  /**
+   * Names the function's body (and its callees') reads and assigns —
+   * syntactic and over-approximate; call sites filter them against the
+   * global scope to find the globals that need home registers.
+   */
+  function fnVarRefs(fn: FnInfo): { refs: Set<string>; writes: Set<string> } {
+    if (fn.varRefs && fn.varWrites) return { refs: fn.varRefs, writes: fn.varWrites };
+    const refs = new Set<string>();
+    const writes = new Set<string>();
+    const seen = new Set<string>([fn.name]);
+    const walk = (node: SyntaxNode) => {
+      if (node.type === "VariableName") refs.add(node.text);
+      if (node.type === "Assignment") {
+        const target = kids(node)[0];
+        if (target?.type === "VariableName") writes.add(target.text);
+      }
+      if (node.type === "FunctionCall") {
+        const callee = fnTable.get(kids(node)[0]?.text ?? "");
+        if (callee && !seen.has(callee.name)) {
+          seen.add(callee.name);
+          for (const statement of callee.body) walk(statement);
+        }
+      }
+      for (const child of node.children) walk(child);
+    };
+    for (const statement of fn.body) walk(statement);
+    fn.varRefs = refs;
+    fn.varWrites = writes;
+    return { refs, writes };
+  }
+
+  // Globals referenced by any jal-called function get a permanent home
+  // register the moment they are declared, so initialization stays where
+  // the source put it and every later write goes through the home.
+  const fnGlobalNames = new Set<string>();
+
+  function collectFnGlobalNames() {
+    for (const fn of fnTable.values()) {
+      if (fn.callCount < 2) continue; // single-site functions inline
+      for (const name of fnVarRefs(fn).refs) fnGlobalNames.add(name);
+    }
   }
 
   function countReturns(block: SyntaxNode[]): number {
@@ -1564,12 +1637,31 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
     scopes.push(paramScope);
     functionScopeBase = scopes.length - 1;
 
+    // Inside the body a global's value may come from any call site: it
+    // lives in its home register and compile-time constants are forgotten.
+    const globalViews: { state: VarState; value: Operand | null; maybe: boolean }[] = [];
+    for (const name of fnVarRefs(fn).refs) {
+      const symbol = scopes[0].get(name);
+      if (symbol?.kind !== "var") continue;
+      const state = symbol.state;
+      const home = state.home;
+      if (home === null) continue;
+      globalViews.push({ state, value: state.value, maybe: state.maybe });
+      state.maybe = state.maybe || state.value === null;
+      state.value = { kind: "vreg", id: home };
+    }
+
     const endLabel = `end${fn.name}`;
     emit({ op: "label", name: fn.name, node: fn.node });
     returnStack.push({ home: fn.retVreg, endLabel });
     for (const statement of fn.body) processStatement(statement);
     returnStack.pop();
     emit({ op: "label", name: endLabel, node: fn.node });
+
+    for (const view of globalViews) {
+      view.state.value = view.value;
+      view.state.maybe = view.maybe;
+    }
 
     // Non-leaf functions must save the return address around their calls
     if (buffer.some(inst => inst.op === "jal")) {
@@ -1597,7 +1689,7 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
       case "Declaration": {
         const nameNode = parts.find(c => c.type === "VariableName");
         if (!nameNode) throw error("Malformed declaration", statement);
-        if (lookup(nameNode.text)) {
+        if (lookup(nameNode.text) || fnTable.has(nameNode.text)) {
           throw error(`${nameNode.text} was already defined`, nameNode);
         }
         const assignIdx = parts.findIndex(c => c.type === "Assign");
@@ -1605,7 +1697,14 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
         // The initializer is evaluated before the name is bound, so a
         // same-named reference is still an IC10 passthrough.
         const value = initializer ? compileExpression(initializer) : null;
-        scopes[scopes.length - 1].set(nameNode.text, { kind: "var", state: { value, maybe: false, home: null } });
+        const state: VarState = { value, maybe: false, home: null };
+        // Globals used inside jal-called functions live in a permanent
+        // home register from the start; writes go through it from here on.
+        if (scopes.length === 1 && fnGlobalNames.has(nameNode.text)) {
+          state.home = vreg();
+          if (value) emit({ op: "movev", dest: state.home, src: value, node: statement });
+        }
+        scopes[scopes.length - 1].set(nameNode.text, { kind: "var", state });
         break;
       }
       case "Assignment": {
@@ -1660,7 +1759,7 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
         const nameNode = parts.find(c => c.type === "VariableName");
         const deviceNode = parts.find(c => c.type === "Device");
         if (!nameNode || !deviceNode) throw error("Malformed device declaration", statement);
-        if (lookup(nameNode.text)) {
+        if (lookup(nameNode.text) || fnTable.has(nameNode.text)) {
           throw error(`${nameNode.text} was already defined`, nameNode);
         }
         scopes[scopes.length - 1].set(nameNode.text, { kind: "device", pin: deviceNode.text });
@@ -1672,7 +1771,7 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
         const assignIdx = parts.findIndex(c => c.type === "Assign");
         const valueNode = assignIdx >= 0 ? parts[assignIdx + 1] : undefined;
         if (!nameNode || !valueNode) throw error("Malformed definition", statement);
-        if (lookup(nameNode.text)) {
+        if (lookup(nameNode.text) || fnTable.has(nameNode.text)) {
           throw error(`${nameNode.text} was already defined`, nameNode);
         }
         const name = nameNode.text;
@@ -2499,22 +2598,29 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
 
   checkSyntax(ast);
   registerFunctions();
+  collectFnGlobalNames();
   for (const statement of ast.children) {
     processStatement(statement);
   }
 
-  // Assemble: functions first (jumped over), then the main program
+  // Assemble: alias/define lines first (from line 0), then functions
+  // (jumped over), then the main program
   const loweredFns = [...fnTable.values()].filter(fn => fn.lowered);
+  const isHeader = (inst: Inst) => inst.op === "alias" || inst.op === "definedef";
+  const buffers = [instructions, ...loweredFns.map(fn => fn.lowered!)];
+  const headers = buffers.flatMap(buffer => buffer.filter(isHeader)).sort((a, b) => a.id - b.id);
+  const mainBody = instructions.filter(inst => !isHeader(inst));
   let program: Inst[];
   if (loweredFns.length > 0) {
     program = [
+      ...headers,
       { op: "jump", target: "ProgramStart", node: ast, id: nextInstId++ } as Inst,
-      ...loweredFns.flatMap(fn => fn.lowered!),
+      ...loweredFns.flatMap(fn => fn.lowered!.filter(inst => !isHeader(inst))),
       { op: "label", name: "ProgramStart", node: ast, id: nextInstId++ } as Inst,
-      ...instructions,
+      ...mainBody,
     ];
   } else {
-    program = instructions;
+    program = [...headers, ...mainBody];
   }
 
   while (true) {
@@ -2529,5 +2635,45 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
     program = next;
   }
 
-  return allocateAndEmit(program);
+  let output = allocateAndEmit(program);
+  
+  if (removeLabels) {
+    output = removeLabelsFromCode(output);
+  }
+
+  return output;
+}
+
+function removeLabelsFromCode(output: string) {
+  // Find all the line numbers for each label
+  const labels = new Map();
+  let lines = output.split("\n");
+
+  for (let i = 0; i < lines.length; i++) {
+    const instruction = lines[i].trim();
+
+    if (instruction.endsWith(":")) {
+      const label = instruction.substring(0, instruction.length - 1).trim();
+      labels.set(label, i); // Starts at line 0
+
+      // Remove the instruction
+      lines.splice(i--, 1);
+    }
+  }
+
+  // Replace all instances of used labels with the line number
+  for (let i = 0; i < lines.length; i++) {
+    const instruction = lines[i].trim();
+    const tokens = instruction.split(" ");
+    
+    for (let j = 0; j < tokens.length; j++) {
+      if (labels.has(tokens[j])) {
+        tokens[j] = labels.get(tokens[j]);
+      }
+    }
+
+    lines[i] = tokens.join(" ");
+  }
+
+  return lines.join("\n");
 }

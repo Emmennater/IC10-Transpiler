@@ -32,6 +32,36 @@ h1 {
   color: #ff6b6b;
 }
 
+h1 {
+  position: relative;
+}
+
+.script-controls {
+  position: absolute;
+  right: 8px;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.script-controls select,
+.script-controls button {
+  background: #363b45;
+  color: #e0e0e0;
+  border: 1px solid #535964;
+  border-radius: 3px;
+  font-family: monospace;
+  font-size: 13px;
+  padding: 3px 8px;
+  cursor: pointer;
+  max-width: 180px;
+}
+
+.script-controls select:hover,
+.script-controls button:hover {
+  background: #414855;
+}
+
 .panel {
   overflow: hidden;
 }

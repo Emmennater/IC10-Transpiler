@@ -1306,6 +1306,114 @@ const cases = {
       "jal triangle",
       "move y r2",
     ],
+  },
+  "functions write global variables": {
+    source: [
+      "let count = 0",
+      "fn bump()",
+      "  count = count + 1",
+      "end",
+      "bump()",
+      "bump()",
+      "c = count",
+    ],
+    // count gets a permanent home register; every write goes through it
+    expected: [
+      "j ProgramStart",
+      "bump:",
+      "add r0 r0 1",
+      "j ra",
+      "ProgramStart:",
+      "move r0 0",
+      "jal bump",
+      "jal bump",
+      "move c r0",
+    ],
+  },
+  "functions read global variables": {
+    source: [
+      "let target = 50",
+      "fn alarmIf(v)",
+      "  if v > target then",
+      "    alarm = 1",
+      "  end",
+      "end",
+      "alarmIf(a)",
+      "alarmIf(b)",
+      "d = target * 2",
+    ],
+    // target lives in a register for the function, but stays a known
+    // constant in the main program (the function never writes it).
+    expected: [
+      "j ProgramStart",
+      "alarmIf:",
+      "ble r1 r0 endif0",
+      "move alarm 1",
+      "endif0:",
+      "j ra",
+      "ProgramStart:",
+      "move r0 50",
+      "move r1 a",
+      "jal alarmIf",
+      "move r1 b",
+      "jal alarmIf",
+      "move d 100",
+    ],
+  },
+  "globals initialize before loops that call functions": {
+    source: [
+      "device housing = db",
+      "let count = 0",
+      "fn bump()",
+      "  count = count + 1",
+      "end",
+      "loop",
+      "  yield",
+      "  bump()",
+      "  bump()",
+      "  housing.Setting = count",
+      "end",
+    ],
+    // count's home register is set up where the declaration is, not at
+    // the first call site — otherwise the loop would reset it every pass.
+    expected: [
+      "alias housing db",
+      "j ProgramStart",
+      "bump:",
+      "add r0 r0 1",
+      "j ra",
+      "ProgramStart:",
+      "move r0 0",
+      "loop0:",
+      "yield",
+      "jal bump",
+      "jal bump",
+      "s housing Setting r0",
+      "j loop0",
+    ],
+  },
+  "alias and define lines start the script": {
+    source: [
+      "let x = 1",
+      "device pump = d0",
+      "define speed = 3",
+      "pump.Setting = x + speed",
+    ],
+    expected: [
+      "alias pump d0",
+      "define speed 3",
+      "add r0 1 speed",
+      "s pump Setting r0",
+    ],
+  },
+  "function names cannot be reused": {
+    source: [
+      "fn foo(a)",
+      "  return a",
+      "end",
+      "let foo = 1",
+    ],
+    error: "Line 3: foo was already defined",
   }
 };
 
@@ -1316,8 +1424,12 @@ for (const [name, { source, expected, error, order }] of Object.entries(cases)) 
   let actual;
   let sourceText = typeof source === "string" || !source ? source : source.join("\n");
   let expectedText = typeof expected === "string" || !expected ? expected : expected.join("\n");
+  let config = {
+    removeLabels: false,
+    registerOrder: order ?? REDUCED_ORDER,
+  }
   try {
-    actual = compile(getAST(sourceText), order ?? REDUCED_ORDER);
+    actual = compile(getAST(sourceText), config);
   } catch (e) {
     if (!(e instanceof CompileError)) throw e;
     actual = e;
