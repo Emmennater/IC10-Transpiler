@@ -1,4 +1,4 @@
-import { editor, updateTextEditor, setRunCallback } from "./codemirror.js";
+import { editor, output, updateTextEditor, setRunCallback } from "./codemirror.js";
 
 const SCRIPTS_KEY = "ic10-compiler-scripts";
 const LAST_KEY = "ic10-compiler-last-script";
