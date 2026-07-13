@@ -3,47 +3,34 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>IC10 Compiler</title>
-  <script type="module" crossorigin src="/IC10-Compiler/assets/index-CXqOJPU3.js"></script>
-  <link rel="stylesheet" crossorigin href="/IC10-Compiler/assets/index-DqrZEQAe.css">
+  <title>Compiler</title>
+  <script type="module" crossorigin src="/Compiler/assets/index-CLgOYtRg.js"></script>
+  <link rel="stylesheet" crossorigin href="/Compiler/assets/index-Cl2-Il17.css">
 </head>
-<body>
-  <hbox class="main">
-    <vbox class="panel">
-      <hbox>
-        <div class="header">
-          <span class="title">
-            <span class="mid">Compiler</span> //
-            <span class="end">v1.0</span>
-          </span>
-          <div class="options">
-            <div id="saved-icon">✔</div>
-            <div id="scripts-input-wrapper" class="input-wrapper">
-              <input id="scripts-input" type="text">
-              <button id="scripts-button">V</button>
-              <button id="new-script">+</button>
-              <button id="delete-script">🗑</button>
-              <div id="scripts" class="dropdown" style="display: none;"></div>
-            </div>
-            <button id="run"><span>Run</span></button>
-          </div>
-        </div>
-      </hbox>
-      <div id="editor-container" class="text-editor"></div>
+<body>
+  <hbox>
+    <vbox id="compiler-wrapper" class="panel">
+      <h1>
+        <span class="title">Compiler</span>
+        <span class="script-controls">
+          <select id="script-select" title="Load a saved script"></select>
+          <button id="script-save" title="Save this script in the browser">Save</button>
+          <button id="script-new" title="Start a new script">New</button>
+          <button id="script-delete" title="Delete the selected script">Delete</button>
+        </span>
+      </h1>
+      <div id="editor" class="editor"></div>
     </vbox>
-    <vbox class="panel right">
-      <hbox>
-        <div class="header">
-          <span class="title">
-            <span class="output">IC10</span>
-          </span>
-          <div class="options">
-            <button id="copy">Copy</button>
-          </div>
-        </div>
-      </hbox>
-      <div id="output-container" class="text-editor"></div>
+    <vbox id="ic10-wrapper" class="panel">
+      <h1>
+        <span class="title">IC10</span>
+        <span id="stats"></span>
+        <span class="script-controls">
+          <button id="copy-output" title="Copy the output to the clipboard">Copy</button>
+        </span>
+      </h1>  
+      <div id="output" class="editor"></div>
     </vbox>
-  </vbox>
+  </hbox>
 </body>
 </html>
