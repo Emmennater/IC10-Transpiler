@@ -706,9 +706,7 @@ const cases = {
       "loop1:",
       "add r0 r0 1",
       "move a r0",
-      "beq r0 10 endloop1",
-      "j loop1",
-      "endloop1:",
+      "bne r0 10 loop1", // The break fuses: loop while x != 10
       "j loop0",
     ]
   },
@@ -966,7 +964,24 @@ const cases = {
       "x = hypot(1, 2)",
       "y = hypot(x, 3)",
     ],
-    expected: "todo",
+    expected: [
+      "j ProgramStart",
+      "hypot:", // Parameters live in r0/r1; the result is computed into r0
+      "mul r0 r0 r0",
+      "mul r1 r1 r1",
+      "add r0 r0 r1",
+      "sqrt r0 r0",
+      "j ra", // Leaf function: no ra bookkeeping
+      "ProgramStart:",
+      "move r0 1",
+      "move r1 2",
+      "jal hypot",
+      "move x r0",
+      "move r0 x",
+      "move r1 3",
+      "jal hypot",
+      "move y r0",
+    ],
   },
   "functions calling functions (reduced order)": {
     source: [
@@ -975,6 +990,7 @@ const cases = {
       "    return a",
       "  else",
       "    return b",
+      "  end", // Closes the if; the fn needs its own end
       "end",
       "fn max(a, b)",
       "  return -min(-a, -b)",
@@ -984,7 +1000,41 @@ const cases = {
       "end",
       "x = constrain(a, 2, 3) + constrain(b, 5, 6)",
     ],
-    expected: "todo",
+    // min is jal-called (two sites); max inlines into constrain, whose
+    // negations retarget straight into min's parameter registers. With
+    // only three registers the first result must survive the second call
+    // on the stack (constrain clobbers r0-r2).
+    expected: [
+      "j ProgramStart",
+      "min:", // a=r1, b=r2, result=r1
+      "blt r1 r2 endmin",
+      "move r1 r2",
+      "endmin:",
+      "j ra",
+      "constrain:", // value=r1, min=r2, max=r0, result=r1
+      "push ra",
+      "sub r1 0 r1", // -value, straight into min's first parameter
+      "sub r2 0 r2", // -min
+      "jal min",
+      "sub r1 0 r1", // max(value, min) = -min(-value, -min)
+      "move r2 r0",
+      "jal min",
+      "pop ra",
+      "j ra",
+      "ProgramStart:",
+      "move r1 a", // Placeholder loads directly into the parameter register
+      "move r2 2",
+      "move r0 3",
+      "jal constrain",
+      "poke 511 r1", // First result survives the second call on the stack
+      "move r1 b",
+      "move r2 5",
+      "move r0 6",
+      "jal constrain",
+      "get r0 db 511",
+      "add r0 r0 r1",
+      "move x r0",
+    ],
   },
   "functions calling functions (full order)": {
     order: FULL_ORDER,
@@ -994,6 +1044,7 @@ const cases = {
       "    return a",
       "  else",
       "    return b",
+      "  end", // Closes the if; the fn needs its own end
       "end",
       "fn max(a, b)",
       "  return -min(-a, -b)",
@@ -1003,7 +1054,38 @@ const cases = {
       "end",
       "x = constrain(a, 2, 3) + constrain(b, 5, 6)",
     ],
-    expected: "todo",
+    // With a full register file the first result rides out the second
+    // call in r0 instead of on the stack.
+    expected: [
+      "j ProgramStart",
+      "min:", // a=r2, b=r3, result=r2
+      "blt r2 r3 endmin",
+      "move r2 r3",
+      "endmin:",
+      "j ra",
+      "constrain:", // value=r2, min=r3, max=r1, result=r2
+      "push ra",
+      "sub r2 0 r2",
+      "sub r3 0 r3",
+      "jal min",
+      "sub r2 0 r2",
+      "move r3 r1",
+      "jal min",
+      "pop ra",
+      "j ra",
+      "ProgramStart:",
+      "move r2 a",
+      "move r3 2",
+      "move r1 3",
+      "jal constrain",
+      "move r0 r2", // First result moves clear of the second call
+      "move r2 b",
+      "move r3 5",
+      "move r1 6",
+      "jal constrain",
+      "add r0 r0 r2",
+      "move x r0",
+    ],
   },
   "parameterless functions": {
     source: [
@@ -1042,7 +1124,9 @@ const cases = {
       "end",
       "x = fib(10)",
     ],
-    expected: "todo",
+    // Runtime recursion would force dynamic stack frames and break the
+    // fixed spill addresses; @constexpr covers compile-time recursion.
+    error: "Line 4: Recursive functions are not supported: fib",
   },
   "mutually recursive functions": {
     source: [
@@ -1062,7 +1146,7 @@ const cases = {
       "end",
       "x = even(10)",
     ],
-    expected: "todo",
+    error: "Line 11: Recursive functions are not supported: even",
   },
   "inlining functions that are only used once": {
     source: [
@@ -1109,8 +1193,39 @@ const cases = {
       "  return bar(a, b) && baz(b, c)",
       "end",
       "x = foo(-2, 0, 4)",
+      "y = foo(3, -2, 1)",
     ],
-    expected: "todo",
+    // baz is jal-called twice; bar inlines into foo; foo is jal-called.
+    // baz's comparison lands directly in its result register.
+    expected: [
+      "j ProgramStart",
+      "baz:", // a=r3, b=r4, result=r3
+      "sgt r3 r3 r4",
+      "j ra",
+      "foo:", // a=r4, b=r1, c=r2, result=r1
+      "push ra",
+      "move r3 r1", // baz(b, a): a is already in baz's second parameter
+      "jal baz",
+      "seqz r0 r3", // !baz(...)
+      "move r3 r1",
+      "move r4 r2",
+      "jal baz",
+      "snez r1 r3",
+      "and r1 r0 r1",
+      "pop ra",
+      "j ra",
+      "ProgramStart:",
+      "move r4 -2",
+      "move r1 0",
+      "move r2 4",
+      "jal foo",
+      "move x r1",
+      "move r4 3",
+      "move r1 -2",
+      "move r2 1",
+      "jal foo",
+      "move y r1",
+    ],
   },
   "functions with many variables": {
     source: [
@@ -1122,7 +1237,40 @@ const cases = {
       "  return w",
       "end",
       "x = foo(1, 2, 3)",
-    ]
+      "y = foo(4, 5, 6)",
+    ],
+    // Three registers cannot hold a, b, c and the chain at once: the two
+    // least-pressing parameters pass through fixed stack slots instead.
+    expected: [
+      "j ProgramStart",
+      "foo:", // a=r0, b=stack 510, c=stack 511, result=r0
+      "mul r1 r0 2",
+      "add r1 r1 1",
+      "get r2 db 511",
+      "add r1 r1 r2",
+      "mul r0 r0 r1",
+      "get r1 db 510",
+      "add r0 r0 r1",
+      "get r1 db 510",
+      "mul r0 r1 r0",
+      "sub r0 r0 4",
+      "j ra",
+      "ProgramStart:",
+      "move r0 1",
+      "move r1 2",
+      "poke 510 r1",
+      "move r1 3",
+      "poke 511 r1",
+      "jal foo",
+      "move x r0",
+      "move r0 4",
+      "move r1 5",
+      "poke 510 r1",
+      "move r1 6",
+      "poke 511 r1",
+      "jal foo",
+      "move y r0",
+    ],
   },
   "functions with loops": {
     source: [
@@ -1136,8 +1284,28 @@ const cases = {
       "  return sum",
       "end",
       "x = triangle(6)",
+      "y = triangle(8)",
     ],
-    expected: "todo",
+    expected: [
+      "j ProgramStart",
+      "triangle:", // n=r0, result=r2 (sum's register, no final move needed)
+      "move r1 0",
+      "move r2 0",
+      "while0:",
+      "bge r1 r0 endwhile0",
+      "add r1 r1 1",
+      "add r2 r2 r1",
+      "j while0",
+      "endwhile0:",
+      "j ra",
+      "ProgramStart:",
+      "move r0 6",
+      "jal triangle",
+      "move x r2",
+      "move r0 8",
+      "jal triangle",
+      "move y r2",
+    ],
   }
 };
 

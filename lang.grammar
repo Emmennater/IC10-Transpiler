@@ -37,10 +37,10 @@ RepeatUntilExpr { kw<"repeat"> block kw<"until"> expression }
 
 Instruction { kw_<"yield"> | kw_<"sleep"> expression }
 
-FunctionCall { FunctionName !call ParenLeft expression (Comma expression)* ParenRight }
+FunctionCall { FunctionName !call ParenLeft (expression (Comma expression)*)? ParenRight }
 
 FunctionDef {
-  kw<"fn"> FunctionName !call ParenLeft VariableName (Comma VariableName)* ParenRight FunctionBlock
+  kw<"fn"> FunctionName !call ParenLeft (VariableName (Comma VariableName)*)? ParenRight FunctionBlock
   kw<"end">
 }
 
@@ -70,7 +70,7 @@ DeviceNameProperty { deviceBase BracketLeft (String | VariableName) BracketRight
 
 Parens { ParenLeft expression ParenRight }
 
-UnaryOp { !neg AddOp expression }
+UnaryOp { !neg (AddOp | Not) expression }
 
 BinaryOp {
   expression !times MulOp expression |
@@ -91,6 +91,7 @@ Bool { kw_<"true"> | kw_<"false"> }
   Integer { @digit+ }
   MulOp { "*" | "/" }
   AddOp { "+" | "-" }
+  Not { "!" }
   CompareOp { "==" | "!=" | "<=" | ">=" | "<" | ">" }
   LogicAnd { "&&" }
   LogicOr { "||" }

@@ -118,6 +118,7 @@ const EXPRESSION_TYPES = new Set([
 const STATEMENT_TYPES = new Set([
   "Declaration", "Assignment", "IfExpr", "LoopExpr", "WhileExpr", "RepeatUntilExpr",
   "break", "continue", "Instruction", "FunctionCall", "DeviceDeclaration", "Definition",
+  "FunctionDef", "Return", "PreprocessorDirective",
 ]);
 
 type VRegOperand = { kind: "vreg"; id: number };
@@ -144,7 +145,11 @@ type Inst =
   | { id: number; op: "definedef"; name: string; value: string; node: SyntaxNode }
   | { id: number; op: "label"; name: string; node: SyntaxNode }
   | { id: number; op: "jump"; target: string; node: SyntaxNode }
-  | { id: number; op: "branch"; opcode: string; args: Operand[]; target: string; node: SyntaxNode };
+  | { id: number; op: "branch"; opcode: string; args: Operand[]; target: string; node: SyntaxNode }
+  // Function call/return: jal jumps to the function's label and comes back;
+  // ret emits `j ra`. Parameters and results travel through shared vregs.
+  | { id: number; op: "jal"; target: string; node: SyntaxNode }
+  | { id: number; op: "ret"; fn: string; node: SyntaxNode };
 
 // Omit that distributes over a union instead of collapsing it
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
@@ -163,7 +168,24 @@ type Sym =
   | { kind: "device"; pin: string }
   // `text` is what uses emit: the define's own name when a `define` line is
   // generated, or the substituted value for bare-identifier definitions
-  | { kind: "define"; text: string; needsLine: boolean };
+  | { kind: "define"; text: string; needsLine: boolean }
+  // A read-only parameter of an inlined function: each use re-compiles the
+  // argument expression in the caller's scope (textual inlining)
+  | { kind: "alias"; argNode: SyntaxNode; callerScopes: Map<string, Sym>[]; callerBase: number };
+
+/** A user-defined function, registered before anything is lowered. */
+type FnInfo = {
+  name: string;
+  params: string[];
+  body: SyntaxNode[];
+  constexpr: boolean;
+  node: SyntaxNode;
+  callCount: number;
+  // Filled in when the function is lowered for jal-style calls
+  paramVregs: number[] | null;
+  retVreg: number | null;
+  lowered: Inst[] | null;
+};
 
 /** Metadata for one lowered if/elif/else, used by branch simplification. */
 type IfRegion = {
@@ -247,13 +269,24 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
   let whileCounter = 0;
   let repeatCounter = 0;
   let shortCircuitCounter = 0;
+  let inlineCounter = 0;
   const scratch = new Set<number>();   // vregs created by spilling; never re-spilled
   const boolVregs = new Set<number>(); // vregs known to hold 0/1
 
   // Innermost scope last; declarations die when their scope is popped
   const scopes: Map<string, Sym>[] = [new Map()];
+  // Variables in scopes below this index are invisible: function bodies see
+  // globals' devices/defines/functions but not the caller's variables.
+  let functionScopeBase = 0;
   // Targets for break/continue of the innermost enclosing loop
   const loopStack: { breakLabel: string; continueLabel: string }[] = [];
+  // Where `return` should deliver its value and jump to
+  const returnStack: { home: number; endLabel: string }[] = [];
+  // User-defined functions and lowering state
+  const fnTable = new Map<string, FnInfo>();
+  const registeredFnNodes = new Set<SyntaxNode>();
+  const loweringStack: string[] = [];
+  const inlineStack: string[] = [];
   // Placeholder name -> vreg already holding it in the current statement,
   // so `a * a` loads `a` once. Not shared across statements: a placeholder
   // may be written in between, and device reads should stay explicit.
@@ -266,16 +299,24 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
     return nextVreg++;
   }
 
+  // Function bodies are emitted into their own buffers and assembled in
+  // front of the main program later.
+  let emitBuffer: Inst[] = instructions;
+
   function emit(inst: DistributiveOmit<Inst, "id">): Inst {
     const complete = { ...inst, id: nextInstId++ } as Inst;
-    instructions.push(complete);
+    emitBuffer.push(complete);
     return complete;
   }
 
   function lookup(name: string): Sym | null {
     for (let i = scopes.length - 1; i >= 0; i--) {
       const symbol = scopes[i].get(name);
-      if (symbol) return symbol;
+      if (symbol) {
+        // Caller variables are not visible inside a function body
+        if ((symbol.kind === "var" || symbol.kind === "alias") && i < functionScopeBase) return null;
+        return symbol;
+      }
     }
     return null;
   }
@@ -327,7 +368,9 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
         const [op, operand] = kids(node);
         const value = foldExpression(operand);
         if (!value) return null;
-        return op.text === "-" ? constOp(-parseFloat(value.text)) : value;
+        if (op.text === "-") return constOp(-parseFloat(value.text));
+        if (op.text === "!") return { kind: "const", text: parseFloat(value.text) === 0 ? "1" : "0" };
+        return value;
       }
       case "BinaryOp": {
         const [left, opNode, right] = kids(node);
@@ -511,6 +554,41 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
     const name = parts[0].text;
     const argNodes = parts.filter(c => EXPRESSION_TYPES.has(c.type));
 
+    // User-defined functions take precedence over raw opcodes
+    const fn = fnTable.get(name);
+    if (fn) {
+      if (argNodes.length !== fn.params.length) {
+        throw error(`${name} expects ${fn.params.length} argument${fn.params.length === 1 ? "" : "s"}`, node);
+      }
+
+      // Constant arguments to a @constexpr function: run it now
+      if (fn.constexpr) {
+        const folded = argNodes.map(a => foldExpression(a));
+        if (folded.every(v => v !== null)) {
+          const result = evalConstexpr(fn, folded.map(v => parseFloat(v!.text)));
+          if (result !== null) {
+            const value = constOp(result);
+            if (value) return wantValue ? value : null;
+          }
+        }
+      }
+
+      // A function with a single call site is inlined at that site
+      if (fn.callCount === 1) return inlineCall(fn, argNodes, node, wantValue);
+
+      // jal-style call: arguments land in the function's parameter vregs
+      const args = argNodes.map(a => compileExpression(a));
+      if (!fn.lowered) lowerFunction(fn, node);
+      args.forEach((a, i) => emit({ op: "movev", dest: fn.paramVregs![i], src: a, node }));
+      emit({ op: "jal", target: fn.name, node });
+      if (!wantValue) return null;
+      // Copy the result out so a later call cannot clobber it; the copy
+      // vanishes when the allocator gives both sides the same register.
+      const copy = vreg();
+      emit({ op: "movev", dest: copy, src: { kind: "vreg", id: fn.retVreg! }, node });
+      return { kind: "vreg", id: copy };
+    }
+
     if (AGGREGATORS.has(name)) {
       if (!wantValue) throw error(`${name}(...) must be assigned to something`, node);
       const arg = argNodes.length === 1 ? argNodes[0] : null;
@@ -594,6 +672,20 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
         if (symbol?.kind === "device") {
           throw error(`${name} is a device, not a value`, node);
         }
+        if (symbol?.kind === "alias") {
+          // Inlined read-only parameter: compile the argument expression in
+          // the caller's scope, where its names resolve.
+          const savedScopes = scopes.slice();
+          const savedBase = functionScopeBase;
+          scopes.length = 0;
+          scopes.push(...symbol.callerScopes);
+          functionScopeBase = symbol.callerBase;
+          const value = compileExpression(symbol.argNode);
+          scopes.length = 0;
+          scopes.push(...savedScopes);
+          functionScopeBase = savedBase;
+          return value;
+        }
         // Placeholder read: must come into a register through a move
         const cached = statementLoads.get(name);
         if (cached !== undefined) return { kind: "vreg", id: cached };
@@ -611,6 +703,16 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
         const [op, operandNode] = kids(node);
         if (op.text === "+") return compileExpression(operandNode);
         const a = compileExpression(operandNode);
+        if (op.text === "!") {
+          // Logical NOT: seqz gives an exact 0/1 for any input
+          if (a.kind === "const") {
+            return { kind: "const", text: parseFloat(a.text) === 0 ? "1" : "0" };
+          }
+          const dest = vreg();
+          emit({ op: "alu", opcode: "seqz", dest, args: [a], node });
+          boolVregs.add(dest);
+          return { kind: "vreg", id: dest };
+        }
         if (a.kind === "const") {
           const folded = constOp(-parseFloat(a.text));
           if (folded) return folded;
@@ -695,6 +797,15 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
         compileCondition(inner, target, jumpWhen);
         return;
       }
+      case "UnaryOp": {
+        // Logical NOT in a condition is free: flip the branch polarity
+        const [op, operandNode] = kids(node);
+        if (op.text === "!") {
+          compileCondition(operandNode, target, !jumpWhen);
+          return;
+        }
+        break; // arithmetic negation: fall through to truthiness
+      }
       case "BinaryOp": {
         const [leftNode, opNode, rightNode] = kids(node);
         const op = opNode.text;
@@ -756,27 +867,31 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
   }
 
   /**
+   * Put a value into a specific vreg, retargeting the instruction that just
+   * produced it instead of adding a move whenever possible.
+   */
+  function writeThrough(home: number, value: Operand, node: SyntaxNode) {
+    const last = emitBuffer[emitBuffer.length - 1];
+    if (
+      value.kind === "vreg" &&
+      value.id >= statementVregBase &&
+      last !== undefined &&
+      destOf(last) === value.id
+    ) {
+      setDest(last, home);
+    } else {
+      emit({ op: "movev", dest: home, src: value, node });
+    }
+  }
+
+  /**
    * Record an assignment's value. For demoted variables (inside an if/loop
-   * that assigns them) the value is also written to the home vreg,
-   * retargeting the instruction that just produced it when possible.
+   * that assigns them) the value is also written to the home vreg.
    */
   function assignVariable(state: VarState, value: Operand, node: SyntaxNode) {
     if (state.home !== null) {
-      const last = instructions[instructions.length - 1];
-      if (
-        value.kind === "vreg" &&
-        value.id >= statementVregBase &&
-        last !== undefined &&
-        destOf(last) === value.id
-      ) {
-        // The value was just computed by this statement; write it straight
-        // into the home register instead of adding a move.
-        setDest(last, state.home);
-        state.value = { kind: "vreg", id: state.home };
-      } else {
-        emit({ op: "movev", dest: state.home, src: value, node });
-        state.value = value.kind === "const" ? value : { kind: "vreg", id: state.home };
-      }
+      writeThrough(state.home, value, node);
+      state.value = value.kind === "const" ? value : { kind: "vreg", id: state.home };
     } else {
       state.value = value;
     }
@@ -1135,6 +1250,345 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
       (d.entryValue !== null && !d.entryMaybe) || (!d.state.maybe && d.state.value !== null));
   }
 
+  // ---------------------------- functions --------------------------------
+
+  /** Register all top-level function definitions before lowering anything. */
+  function registerFunctions() {
+    let pendingConstexpr = false;
+    for (const statement of kids(ast)) {
+      if (statement.type === "PreprocessorDirective") {
+        const directive = kids(statement).find(c => c.type === "DirectiveName");
+        if (directive?.text !== "constexpr") {
+          throw error(`Unknown directive @${directive?.text ?? ""}`, statement);
+        }
+        pendingConstexpr = true;
+        continue;
+      }
+      if (statement.type === "FunctionDef") {
+        const parts = kids(statement);
+        const nameNode = parts.find(c => c.type === "FunctionName");
+        const block = parts.find(c => c.type === "FunctionBlock");
+        if (!nameNode || !block) throw error("Malformed function definition", statement);
+        if (fnTable.has(nameNode.text)) {
+          throw error(`${nameNode.text} was already defined`, nameNode);
+        }
+        const blockIdx = parts.indexOf(block);
+        const params = parts.slice(0, blockIdx).filter(c => c.type === "VariableName").map(c => c.text);
+        fnTable.set(nameNode.text, {
+          name: nameNode.text,
+          params,
+          body: kids(block).filter(c => STATEMENT_TYPES.has(c.type)),
+          constexpr: pendingConstexpr,
+          node: statement,
+          callCount: 0,
+          paramVregs: null,
+          retVreg: null,
+          lowered: null,
+        });
+        registeredFnNodes.add(statement);
+      }
+      pendingConstexpr = false;
+    }
+
+    // Count call sites for the inline-single-use decision
+    const countIn = (node: SyntaxNode) => {
+      if (node.type === "FunctionCall") {
+        const name = kids(node).find(c => c.type === "FunctionName")?.text;
+        const fn = name ? fnTable.get(name) : undefined;
+        if (fn) fn.callCount++;
+      }
+      for (const child of node.children) countIn(child);
+    };
+    countIn(ast);
+  }
+
+  function countReturns(block: SyntaxNode[]): number {
+    let count = 0;
+    const walk = (node: SyntaxNode) => {
+      if (node.type === "Return") count++;
+      // Nested function definitions are rejected elsewhere
+      for (const child of node.children) walk(child);
+    };
+    for (const statement of block) walk(statement);
+    return count;
+  }
+
+  /**
+   * Interpret a @constexpr function at compile time. Returns null when the
+   * body does something that only exists at runtime (placeholders, devices,
+   * raw instructions) or when the evaluation budget runs out.
+   */
+  function evalConstexpr(fn: FnInfo, args: number[]): number | null {
+    const BAIL = { bail: true };
+    let steps = 0;
+    const tick = () => {
+      if (++steps > 200000) throw BAIL;
+    };
+
+    type Env = Map<string, number>[];
+    const findEnv = (envs: Env, name: string): Map<string, number> | null => {
+      for (let i = envs.length - 1; i >= 0; i--) {
+        if (envs[i].has(name)) return envs[i];
+      }
+      return null;
+    };
+
+    const evalNode = (node: SyntaxNode, envs: Env): number => {
+      tick();
+      switch (node.type) {
+        case "Number": return parseFloat(node.text);
+        case "Bool": return node.text === "true" ? 1 : 0;
+        case "VariableName": {
+          const env = findEnv(envs, node.text);
+          if (!env) throw BAIL;
+          return env.get(node.text)!;
+        }
+        case "Parens": {
+          const inner = kids(node).find(c => EXPRESSION_TYPES.has(c.type));
+          if (!inner) throw BAIL;
+          return evalNode(inner, envs);
+        }
+        case "UnaryOp": {
+          const [op, operand] = kids(node);
+          const value = evalNode(operand, envs);
+          if (op.text === "-") return -value;
+          if (op.text === "!") return value === 0 ? 1 : 0;
+          return value;
+        }
+        case "BinaryOp": {
+          const [left, opNode, right] = kids(node);
+          const op = opNode.text;
+          if (op === "&&") return evalNode(left, envs) !== 0 && evalNode(right, envs) !== 0 ? 1 : 0;
+          if (op === "||") return evalNode(left, envs) !== 0 || evalNode(right, envs) !== 0 ? 1 : 0;
+          const x = evalNode(left, envs);
+          const y = evalNode(right, envs);
+          if (op in COMPARE_JS) return COMPARE_JS[op](x, y) ? 1 : 0;
+          switch (op) {
+            case "+": return x + y;
+            case "-": return x - y;
+            case "*": return x * y;
+            case "/": return x / y;
+          }
+          throw BAIL;
+        }
+        case "FunctionCall": {
+          const parts = kids(node);
+          const callee = fnTable.get(parts[0].text);
+          if (!callee) throw BAIL;
+          const argNodes = parts.filter(c => EXPRESSION_TYPES.has(c.type));
+          if (argNodes.length !== callee.params.length) throw BAIL;
+          return run(callee, argNodes.map(a => evalNode(a, envs)));
+        }
+        default:
+          throw BAIL;
+      }
+    };
+
+    const RETURN = { value: 0 };
+    const BREAK = { brk: true };
+    const CONTINUE = { cont: true };
+
+    const execBlock = (block: SyntaxNode[], envs: Env) => {
+      envs.push(new Map());
+      try {
+        for (const statement of block) execStatement(statement, envs);
+      } finally {
+        envs.pop();
+      }
+    };
+
+    const execStatement = (statement: SyntaxNode, envs: Env) => {
+      tick();
+      const parts = kids(statement);
+      switch (statement.type) {
+        case "Declaration": {
+          const nameNode = parts.find(c => c.type === "VariableName")!;
+          const assignIdx = parts.findIndex(c => c.type === "Assign");
+          const value = assignIdx >= 0 ? evalNode(parts[assignIdx + 1], envs) : NaN;
+          envs[envs.length - 1].set(nameNode.text, value);
+          return;
+        }
+        case "Assignment": {
+          const target = parts[0];
+          if (target.type !== "VariableName") throw BAIL;
+          const env = findEnv(envs, target.text);
+          if (!env) throw BAIL; // placeholder write = side effect
+          const assignIdx = parts.findIndex(c => c.type === "Assign");
+          env.set(target.text, evalNode(parts[assignIdx + 1], envs));
+          return;
+        }
+        case "Return": {
+          const expr = parts.find(c => EXPRESSION_TYPES.has(c.type));
+          if (!expr) throw BAIL;
+          RETURN.value = evalNode(expr, envs);
+          throw RETURN;
+        }
+        case "IfExpr": {
+          for (const part of parts) {
+            if (part.type === "If" || part.type === "ElseIf") {
+              const cond = conditionOf(part);
+              if (cond && evalNode(cond, envs) !== 0) {
+                execBlock(blockOf(part), envs);
+                return;
+              }
+            } else if (part.type === "Else") {
+              execBlock(blockOf(part), envs);
+              return;
+            }
+          }
+          return;
+        }
+        case "LoopExpr":
+        case "WhileExpr":
+        case "RepeatUntilExpr": {
+          const cond = statement.type === "LoopExpr" ? null : conditionOf(statement);
+          const body = blockOf(statement);
+          for (;;) {
+            tick();
+            if (statement.type === "WhileExpr" && cond && evalNode(cond, envs) === 0) return;
+            try {
+              execBlock(body, envs);
+            } catch (e) {
+              if (e === BREAK) return;
+              if (e !== CONTINUE) throw e;
+            }
+            if (statement.type === "RepeatUntilExpr" && cond && evalNode(cond, envs) !== 0) return;
+          }
+        }
+        case "break": throw BREAK;
+        case "continue": throw CONTINUE;
+        case "Comment": return;
+        default:
+          throw BAIL; // yield/sleep/devices/etc. only exist at runtime
+      }
+    };
+
+    const run = (callee: FnInfo, argValues: number[]): number => {
+      tick();
+      const envs: Env = [new Map(callee.params.map((p, i) => [p, argValues[i]]))];
+      try {
+        for (const statement of callee.body) execStatement(statement, envs);
+      } catch (e) {
+        if (e === RETURN) return RETURN.value;
+        throw e;
+      }
+      throw BAIL; // fell off the end without returning a value
+    };
+
+    try {
+      const result = run(fn, args);
+      return Number.isFinite(result) ? result : null;
+    } catch (e) {
+      if (e === BAIL) return null;
+      throw e;
+    }
+  }
+
+  /** Inline a single-call-site function at its call site (textual inlining). */
+  function inlineCall(fn: FnInfo, argNodes: SyntaxNode[], node: SyntaxNode, wantValue: boolean): Operand | null {
+    if (inlineStack.includes(fn.name) || loweringStack.includes(fn.name)) {
+      throw error(`Recursive functions are not supported: ${fn.name}`, node);
+    }
+    inlineStack.push(fn.name);
+
+    const callerScopes = scopes.slice();
+    const callerBase = functionScopeBase;
+
+    // Parameters that the body reassigns must become real variables,
+    // evaluated once up front; read-only parameters stay lazy aliases.
+    const reassigned = new Set<string>();
+    collectAssignedNames(fn.body, reassigned);
+    const paramScope = new Map<string, Sym>();
+    fn.params.forEach((param, i) => {
+      if (reassigned.has(param)) {
+        const value = compileExpression(argNodes[i]);
+        paramScope.set(param, { kind: "var", state: { value, maybe: false, home: null } });
+      } else {
+        paramScope.set(param, { kind: "alias", argNode: argNodes[i], callerScopes, callerBase });
+      }
+    });
+
+    scopes.push(paramScope);
+    const savedBase = functionScopeBase;
+    functionScopeBase = scopes.length - 1;
+
+    let result: Operand | null = null;
+    const last = fn.body[fn.body.length - 1];
+    if (last?.type === "Return" && countReturns(fn.body) === 1) {
+      // Single trailing return: the result is just an operand
+      for (const statement of fn.body.slice(0, -1)) processStatement(statement);
+      const expr = kids(last).find(c => EXPRESSION_TYPES.has(c.type));
+      if (!expr) throw error("return needs a value", last);
+      if (wantValue) result = compileExpression(expr);
+    } else {
+      const home = vreg();
+      const endLabel = `inline${inlineCounter++}`;
+      returnStack.push({ home, endLabel });
+      for (const statement of fn.body) processStatement(statement);
+      returnStack.pop();
+      emit({ op: "label", name: endLabel, node });
+      if (wantValue) result = { kind: "vreg", id: home };
+    }
+
+    functionScopeBase = savedBase;
+    scopes.pop();
+    inlineStack.pop();
+    return result;
+  }
+
+  /** Lower a function body into its own buffer for jal-style calls. */
+  function lowerFunction(fn: FnInfo, node: SyntaxNode) {
+    if (loweringStack.includes(fn.name) || inlineStack.includes(fn.name)) {
+      throw error(`Recursive functions are not supported: ${fn.name}`, node);
+    }
+    loweringStack.push(fn.name);
+
+    const buffer: Inst[] = [];
+    const savedBuffer = emitBuffer;
+    const savedBase = functionScopeBase;
+    const savedScopesLength = scopes.length;
+    const savedLoads = statementLoads;
+    const savedVregBase = statementVregBase;
+    emitBuffer = buffer;
+    statementLoads = new Map();
+
+    fn.paramVregs = fn.params.map(() => vreg());
+    fn.retVreg = vreg();
+    const paramScope = new Map<string, Sym>();
+    fn.params.forEach((param, i) => {
+      paramScope.set(param, {
+        kind: "var",
+        state: { value: { kind: "vreg", id: fn.paramVregs![i] }, maybe: false, home: null },
+      });
+    });
+    scopes.push(paramScope);
+    functionScopeBase = scopes.length - 1;
+
+    const endLabel = `end${fn.name}`;
+    emit({ op: "label", name: fn.name, node: fn.node });
+    returnStack.push({ home: fn.retVreg, endLabel });
+    for (const statement of fn.body) processStatement(statement);
+    returnStack.pop();
+    emit({ op: "label", name: endLabel, node: fn.node });
+
+    // Non-leaf functions must save the return address around their calls
+    if (buffer.some(inst => inst.op === "jal")) {
+      buffer.splice(1, 0, {
+        op: "call", opcode: "push", dest: null, args: [sym("ra")], node: fn.node, id: nextInstId++,
+      } as Inst);
+      emit({ op: "call", opcode: "pop", dest: null, args: [sym("ra")], node: fn.node });
+    }
+    emit({ op: "ret", fn: fn.name, node: fn.node });
+
+    scopes.length = savedScopesLength;
+    functionScopeBase = savedBase;
+    emitBuffer = savedBuffer;
+    statementLoads = savedLoads;
+    statementVregBase = savedVregBase;
+    loweringStack.pop();
+    fn.lowered = buffer;
+  }
+
   // --------------------------- statements --------------------------------
 
   function processStatement(statement: SyntaxNode) {
@@ -1293,6 +1747,28 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
         }
         break;
       }
+      case "FunctionDef": {
+        if (!registeredFnNodes.has(statement)) {
+          throw error("Functions must be defined at the top level", statement);
+        }
+        break; // registered up front; lowered lazily when called
+      }
+      case "PreprocessorDirective": {
+        if (scopes.length > 1) {
+          throw error("Directives must appear at the top level", statement);
+        }
+        break; // handled during function registration
+      }
+      case "Return": {
+        const context = returnStack[returnStack.length - 1];
+        if (!context) throw error("return outside of a function", statement);
+        const expression = parts.find(c => EXPRESSION_TYPES.has(c.type));
+        if (!expression) throw error("return needs a value", statement);
+        const value = compileExpression(expression);
+        writeThrough(context.home, value, statement);
+        emit({ op: "jump", target: context.endLabel, node: statement });
+        break;
+      }
       case "Comment":
         break;
       default:
@@ -1374,8 +1850,10 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
    * single pass is not enough: iterate until label live-sets stabilize.
    * Definitions that are dead (and side-effect free) contribute no uses.
    */
-  function convergeLiveness(program: Inst[]): Map<string, Set<number>> {
+  function convergeLiveness(program: Inst[]) {
     const liveAtLabel = new Map<string, Set<number>>();
+    // What is live after a function returns: the union over its call sites
+    const retLive = new Map<string, Set<number>>();
     for (let pass = 0; pass < program.length + 2; pass++) {
       let changed = false;
       let live = new Set<number>();
@@ -1398,6 +1876,22 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
             for (const used of usesOf(inst)) live.add(used);
             break;
           }
+          case "jal": {
+            // Values live after the call flow through the callee's body
+            let after = retLive.get(inst.target);
+            if (!after) retLive.set(inst.target, after = new Set());
+            for (const v of live) {
+              if (!after.has(v)) {
+                after.add(v);
+                changed = true;
+              }
+            }
+            live = new Set(liveAtLabel.get(inst.target) ?? []);
+            break;
+          }
+          case "ret":
+            live = new Set(retLive.get(inst.fn) ?? []);
+            break;
           default: {
             const dest = destOf(inst);
             if (!hasSideEffect(inst) && dest !== null && !live.has(dest)) break; // dead
@@ -1408,15 +1902,17 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
       }
       if (!changed) break;
     }
-    return liveAtLabel;
+    return { liveAtLabel, retLive };
   }
 
   /** Keep only instructions that contribute to a side effect. */
   function eliminateDeadCode(program: Inst[]): Inst[] {
-    const liveAtLabel = convergeLiveness(program);
+    const { liveAtLabel, retLive } = convergeLiveness(program);
     let live = new Set<number>();
-    // Symbol names (aliases, defines) referenced by kept instructions;
-    // walking backward sees every use before its alias/define line.
+    // Symbol names (aliases, defines) referenced by kept instructions.
+    // Function bodies sit in front of the main program, so a use can
+    // appear at an earlier position than its alias line: decide the
+    // alias/define lines in a second sweep once all uses are known.
     const usedSyms = new Set<string>();
     const kept: Inst[] = [];
     const keep = (inst: Inst) => {
@@ -1440,9 +1936,17 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
           keep(inst);
           continue;
         }
+        case "jal":
+          live = new Set(liveAtLabel.get(inst.target) ?? []);
+          keep(inst);
+          continue;
+        case "ret":
+          live = new Set(retLive.get(inst.fn) ?? []);
+          keep(inst);
+          continue;
         case "alias":
         case "definedef":
-          if (usedSyms.has(inst.name)) keep(inst);
+          kept.push(inst); // decided below, once every use is known
           continue;
       }
       const dest = destOf(inst);
@@ -1451,7 +1955,9 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
       for (const used of usesOf(inst)) live.add(used);
       keep(inst);
     }
-    return kept.reverse();
+    return kept
+      .reverse()
+      .filter(inst => (inst.op !== "alias" && inst.op !== "definedef") || usedSyms.has(inst.name));
   }
 
   /**
@@ -1501,17 +2007,20 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
         continue;
       }
 
-      // A lone then-arm that is exactly `break`/`continue`: jump there
-      // directly when the condition holds.
-      if (region.arms.length === 1 && region.arms[0].branchIds.length === 1) {
+      // A then-arm that is exactly one jump (break/continue/return): jump
+      // there directly when the condition holds; any else arm falls through.
+      if (region.arms.length <= 2 && region.arms[0].branchIds.length === 1) {
         const thenArm = region.arms[0];
         const only = contents[0];
-        if (only.length === 1 && only[0].op === "jump") {
+        if (only.length === 1 && only[0].op === "jump" &&
+            (region.arms.length === 1 || thenArm.labelName?.startsWith("else"))) {
           const branch = present.get(thenArm.branchIds[0]);
           if (branch && branch.op === "branch" && INVERT_BRANCH[branch.opcode]) {
             branch.opcode = INVERT_BRANCH[branch.opcode];
             branch.target = only[0].target;
             remove.add(only[0].id);
+            if (thenArm.jumpId !== null) remove.add(thenArm.jumpId);
+            if (thenArm.labelId !== null) remove.add(thenArm.labelId);
             region.simplified = true;
             changed = true;
             continue;
@@ -1586,7 +2095,7 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
         continue;
       }
       kept.push(inst);
-      if (inst.op === "jump") reachable = false;
+      if (inst.op === "jump" || inst.op === "ret") reachable = false;
     }
     return changed ? kept : null;
   }
@@ -1614,7 +2123,7 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
   function collectGarbageLabels(program: Inst[]): Inst[] | null {
     const targets = new Set<string>();
     for (const inst of program) {
-      if (inst.op === "jump" || inst.op === "branch") targets.add(inst.target);
+      if (inst.op === "jump" || inst.op === "branch" || inst.op === "jal") targets.add(inst.target);
     }
     const kept = program.filter(inst => inst.op !== "label" || targets.has(inst.name));
     return kept.length === program.length ? null : kept;
@@ -1625,14 +2134,25 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
   // ---------------------------------------------------------------------
 
   /**
-   * Live ranges from converged dataflow: a value's range ends at the last
-   * position where it is still live-in, which extends across loop back
-   * edges (a value used early in a loop body is busy until the back jump).
+   * Live ranges from converged dataflow, split into one segment per code
+   * region (main and each function body). A value live across a call is
+   * live inside the callee's positions too, so segments capture exactly
+   * where a register is needed — between its segments (other functions
+   * that never run while it is in flight) the register is free.
    */
-  function computeRanges(program: Inst[]) {
-    const liveAtLabel = convergeLiveness(program);
-    const end = new Map<number, number>();
+  function computeSegments(program: Inst[]) {
+    const { liveAtLabel, retLive } = convergeLiveness(program);
+
+    // Every position where each vreg needs its register
+    const touched = new Map<number, Set<number>>();
     const useCount = new Map<number, number>();
+    const defPositions = new Map<number, Set<number>>();
+    const touch = (v: number, position: number) => {
+      let positions = touched.get(v);
+      if (!positions) touched.set(v, positions = new Set());
+      positions.add(position);
+    };
+
     let live = new Set<number>();
     for (let i = program.length - 1; i >= 0; i--) {
       const inst = program[i];
@@ -1643,25 +2163,52 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
         case "jump":
           live = new Set(liveAtLabel.get(inst.target) ?? []);
           break;
+        case "jal":
+          live = new Set(liveAtLabel.get(inst.target) ?? []);
+          break;
+        case "ret":
+          live = new Set(retLive.get(inst.fn) ?? []);
+          break;
         case "branch":
           for (const v of liveAtLabel.get(inst.target) ?? []) live.add(v);
           for (const used of usesOf(inst)) live.add(used);
           break;
         default: {
           const dest = destOf(inst);
-          if (dest !== null) live.delete(dest);
+          if (dest !== null) {
+            live.delete(dest);
+            touch(dest, i);
+            let defs = defPositions.get(dest);
+            if (!defs) defPositions.set(dest, defs = new Set());
+            defs.add(i);
+          }
           for (const used of usesOf(inst)) live.add(used);
         }
       }
       for (const used of usesOf(inst)) {
         useCount.set(used, (useCount.get(used) ?? 0) + 1);
+        touch(used, i);
       }
       // `live` is now the live-in set of instruction i
-      for (const v of live) {
-        if (!end.has(v)) end.set(v, i);
-      }
+      for (const v of live) touch(v, i);
     }
-    return { end, useCount };
+
+    // Compress each vreg's positions into maximal contiguous runs. In the
+    // gaps the value is dead (it is redefined before its next segment, or
+    // those positions cannot execute while it is in flight), so its
+    // register is genuinely free there.
+    const segments = new Map<number, { start: number; end: number }[]>();
+    for (const [v, positions] of touched) {
+      const sorted = [...positions].sort((a, b) => a - b);
+      const runs: { start: number; end: number }[] = [];
+      for (const position of sorted) {
+        const last = runs[runs.length - 1];
+        if (last && position === last.end + 1) last.end = position;
+        else runs.push({ start: position, end: position });
+      }
+      segments.set(v, runs);
+    }
+    return { segments, useCount, defPositions };
   }
 
   /**
@@ -1692,6 +2239,7 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
           other.op === "alias" || other.op === "definedef" ||
           other.op === "poke" || other.op === "get" ||
           other.op === "label" || other.op === "jump" || other.op === "branch" ||
+          other.op === "jal" || other.op === "ret" ||
           destOf(other) === value;
         if (barrier) break;
         target = j;
@@ -1712,75 +2260,190 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
     // by choosing the variable that blocks its register the longest.
     // Once all registers can be assigned, emit the program.
     while (true) {
-      const { end, useCount } = computeRanges(program);
+      const { segments, useCount, defPositions } = computeSegments(program);
+
+      // One work item per (vreg, region) segment, in position order. The
+      // first segment of a vreg picks its register; later segments occupy
+      // the same register in other regions.
+      type Seg = { v: number; start: number; end: number };
+      const items: Seg[] = [];
+      for (const [v, runs] of segments) {
+        for (const span of runs) items.push({ v, start: span.start, end: span.end });
+      }
+      // At equal starts, segments that begin with a definition go last:
+      // the values they read at that position must re-occupy their
+      // registers first, so read-then-write sharing works out.
+      const startsAtDef = (s: Seg) => defPositions.get(s.v)?.has(s.start) ?? false;
+      items.sort((a, b) =>
+        a.start - b.start ||
+        (startsAtDef(a) ? 1 : 0) - (startsAtDef(b) ? 1 : 0) ||
+        a.v - b.v);
+
+      const lastEnd = new Map<number, number>();
+      for (const item of items) {
+        lastEnd.set(item.v, Math.max(lastEnd.get(item.v) ?? -1, item.end));
+      }
+
+      // Two segments conflict unless they only meet where one is being
+      // read for the last time as the other is defined (read-then-write:
+      // IC10 reads all operands before writing the destination).
+      const conflicts = (a: Seg, b: Seg): boolean => {
+        if (a.start > b.end || b.start > a.end) return false;
+        if (a.start === b.end && defPositions.get(a.v)?.has(a.start)) return false;
+        if (b.start === a.end && defPositions.get(b.v)?.has(b.start)) return false;
+        return true;
+      };
 
       const regOf = new Map<number, number>();
-      const active: number[] = [];
-      const free = [...registerOrder];
+      const active: { v: number; reg: number; end: number }[] = [];
       let victim: number | null = null;
       let victimNode: SyntaxNode = ast;
 
-      for (let i = 0; i < program.length && victim === null; i++) {
-        const dest = destOf(program[i]);
-        if (dest === null) continue;
-        if (regOf.has(dest)) continue; // later write to a home vreg
-
-        // Values not live past this point release their register:
+      for (const item of items) {
+        const itemStartsAtDef = startsAtDef(item);
+        // Release registers whose values are not live past this point:
         // IC10 reads operands before writing the destination.
         for (let k = active.length - 1; k >= 0; k--) {
-          const v = active[k];
-          if ((end.get(v) ?? i) <= i) {
+          const entry = active[k];
+          if (entry.end < item.start || (entry.end === item.start && itemStartsAtDef && entry.v !== item.v)) {
             active.splice(k, 1);
-            free.push(regOf.get(v)!);
           }
         }
 
-        if (free.length === 0) {
-          // Spill the least-used value; break ties toward the one that
-          // blocks its register the longest.
-          const candidates = [...active, dest].filter(v => !scratch.has(v));
+        const assigned = regOf.get(item.v);
+        if (assigned !== undefined) {
+          // A later segment of an already-placed value re-occupies its register
+          const holder = active.find(a => a.reg === assigned && a.v !== item.v);
+          if (holder) {
+            victim = holder.v;
+            victimNode = program[item.start].node;
+            break;
+          }
+          const existing = active.find(a => a.v === item.v);
+          if (existing) existing.end = Math.max(existing.end, item.end);
+          else active.push({ v: item.v, reg: assigned, end: item.end });
+          continue;
+        }
+
+        // Registers claimed by future segments of already-placed values
+        // that overlap this one are off limits.
+        const forbidden = new Set<number>();
+        for (const [w, reg] of regOf) {
+          if (w === item.v) continue;
+          const wRuns = segments.get(w);
+          if (!wRuns) continue;
+          for (const span of wRuns) {
+            if (conflicts(item, { v: w, start: span.start, end: span.end })) {
+              forbidden.add(reg);
+              break;
+            }
+          }
+        }
+
+        const allowed = (r: number) => !forbidden.has(r) && !active.some(a => a.reg === r);
+        // Prefer sharing a register with a copy's other side, so the move
+        // can be elided at emission: the source when this value starts as
+        // a copy, or the destination when it ends by being copied away.
+        let preferred: number | undefined;
+        const startInst = program[item.start];
+        if (startInst?.op === "movev" && startInst.dest === item.v && startInst.src.kind === "vreg") {
+          preferred = regOf.get(startInst.src.id);
+        }
+        if (preferred === undefined || !allowed(preferred)) {
+          const endInst = program[item.end];
+          if (endInst?.op === "movev" && endInst.src.kind === "vreg" && endInst.src.id === item.v) {
+            preferred = regOf.get(endInst.dest);
+          }
+        }
+        const pick = preferred !== undefined && allowed(preferred)
+          ? preferred
+          : registerOrder.find(allowed);
+        if (pick === undefined) {
+          // Spill the value that blocks its register the longest; break
+          // ties toward the least-used one. Short-lived values are never
+          // worth spilling — freeing their register relieves nothing.
+          const candidates = [...active.map(a => a.v), item.v].filter(v => !scratch.has(v));
           if (candidates.length === 0) {
-            throw error("Expression too complex: not enough registers", program[i].node);
+            throw error("Expression too complex: not enough registers", program[item.start].node);
           }
           candidates.sort((x, y) =>
+            (lastEnd.get(y) ?? 0) - (lastEnd.get(x) ?? 0) ||
             (useCount.get(x) ?? 0) - (useCount.get(y) ?? 0) ||
-            (end.get(y) ?? 0) - (end.get(x) ?? 0) ||
             y - x);
           victim = candidates[0];
-          victimNode = program[i].node;
+          victimNode = program[item.start].node;
           break;
         }
 
-        free.sort((a, b) => registerOrder.indexOf(a) - registerOrder.indexOf(b));
-        regOf.set(dest, free.shift()!);
-        active.push(dest);
+        regOf.set(item.v, pick);
+        active.push({ v: item.v, reg: pick, end: item.end });
       }
 
       if (victim === null) {
-        // Success: render the IR with real registers
+        // Success. Copies where both sides landed in the same register are
+        // no-ops; dropping them can expose branch-over-jump patterns
+        // (e.g. a return inside an if), so clean up once more.
+        program = program.filter(inst =>
+          !(inst.op === "movev" && inst.src.kind === "vreg" &&
+            regOf.get(inst.src.id) === regOf.get(inst.dest)));
+        for (;;) {
+          const refs = new Map<string, number>();
+          for (const inst of program) {
+            if (inst.op === "jump" || inst.op === "branch" || inst.op === "jal") {
+              refs.set(inst.target, (refs.get(inst.target) ?? 0) + 1);
+            }
+          }
+          let fused = false;
+          for (let i = 0; i + 2 < program.length; i++) {
+            const branch = program[i];
+            const jump = program[i + 1];
+            const label = program[i + 2];
+            if (branch.op === "branch" && jump.op === "jump" && label.op === "label" &&
+                branch.target === label.name && refs.get(label.name) === 1 &&
+                INVERT_BRANCH[branch.opcode]) {
+              branch.opcode = INVERT_BRANCH[branch.opcode];
+              branch.target = jump.target;
+              program.splice(i + 1, 2);
+              fused = true;
+              break;
+            }
+          }
+          if (fused) continue;
+          const next = removeJumpsToNext(program) ?? collectGarbageLabels(program);
+          if (!next) break;
+          program = next;
+        }
+
+        // Render the IR with real registers
         const fmt = (operand: Operand): string =>
           operand.kind === "vreg" ? `r${regOf.get(operand.id)}` : operand.text;
-        return program
-          .map(inst => {
-            switch (inst.op) {
-              case "alu": return `${inst.opcode} r${regOf.get(inst.dest)} ${inst.args.map(fmt).join(" ")}`;
-              case "movev": return `move r${regOf.get(inst.dest)} ${fmt(inst.src)}`;
-              case "loadname": return `move r${regOf.get(inst.dest)} ${inst.name}`;
-              case "storename": return `move ${inst.name} ${fmt(inst.src)}`;
-              case "get": return `get r${regOf.get(inst.dest)} db ${inst.addr}`;
-              case "poke": return `poke ${inst.addr} ${fmt(inst.src)}`;
-              case "call":
-                return inst.dest === null
-                  ? [inst.opcode, ...inst.args.map(fmt)].join(" ")
-                  : [inst.opcode, `r${regOf.get(inst.dest)}`, ...inst.args.map(fmt)].join(" ");
-              case "alias": return `alias ${inst.name} ${inst.device}`;
-              case "definedef": return `define ${inst.name} ${inst.value}`;
-              case "label": return `${inst.name}:`;
-              case "jump": return `j ${inst.target}`;
-              case "branch": return `${inst.opcode} ${inst.args.map(fmt).join(" ")} ${inst.target}`;
+        const lines: string[] = [];
+        for (const inst of program) {
+          switch (inst.op) {
+            case "alu": lines.push(`${inst.opcode} r${regOf.get(inst.dest)} ${inst.args.map(fmt).join(" ")}`); break;
+            case "movev": {
+              lines.push(`move r${regOf.get(inst.dest)} ${fmt(inst.src)}`);
+              break;
             }
-          })
-          .join("\n");
+            case "loadname": lines.push(`move r${regOf.get(inst.dest)} ${inst.name}`); break;
+            case "storename": lines.push(`move ${inst.name} ${fmt(inst.src)}`); break;
+            case "get": lines.push(`get r${regOf.get(inst.dest)} db ${inst.addr}`); break;
+            case "poke": lines.push(`poke ${inst.addr} ${fmt(inst.src)}`); break;
+            case "call":
+              lines.push(inst.dest === null
+                ? [inst.opcode, ...inst.args.map(fmt)].join(" ")
+                : [inst.opcode, `r${regOf.get(inst.dest)}`, ...inst.args.map(fmt)].join(" "));
+              break;
+            case "alias": lines.push(`alias ${inst.name} ${inst.device}`); break;
+            case "definedef": lines.push(`define ${inst.name} ${inst.value}`); break;
+            case "label": lines.push(`${inst.name}:`); break;
+            case "jump": lines.push(`j ${inst.target}`); break;
+            case "branch": lines.push(`${inst.opcode} ${inst.args.map(fmt).join(" ")} ${inst.target}`); break;
+            case "jal": lines.push(`jal ${inst.target}`); break;
+            case "ret": lines.push("j ra"); break;
+          }
+        }
+        return lines.join("\n");
       }
 
       // First response to pressure: shorten live ranges by storing
@@ -1835,11 +2498,25 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
   // ---------------------------------------------------------------------
 
   checkSyntax(ast);
+  registerFunctions();
   for (const statement of ast.children) {
     processStatement(statement);
   }
 
-  let program: Inst[] = instructions;
+  // Assemble: functions first (jumped over), then the main program
+  const loweredFns = [...fnTable.values()].filter(fn => fn.lowered);
+  let program: Inst[];
+  if (loweredFns.length > 0) {
+    program = [
+      { op: "jump", target: "ProgramStart", node: ast, id: nextInstId++ } as Inst,
+      ...loweredFns.flatMap(fn => fn.lowered!),
+      { op: "label", name: "ProgramStart", node: ast, id: nextInstId++ } as Inst,
+      ...instructions,
+    ];
+  } else {
+    program = instructions;
+  }
+
   while (true) {
     program = eliminateDeadCode(program);
     const next =
