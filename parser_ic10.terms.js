@@ -16,6 +16,8 @@ export const
   Channel = 14,
   Colon = 15,
   Integer = 16,
-  Register = 17,
-  Label = 18,
-  LabelName = 19
+  DeviceProperty = 17,
+  Dot = 18,
+  Register = 19,
+  Label = 20,
+  LabelName = 21

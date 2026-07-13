@@ -59,8 +59,8 @@ export class CompileError extends Error {
 
 
 // Preferred assignment order for variable registers
-// const VAR_REGISTER_ORDER = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
-const VAR_REGISTER_ORDER = [0, 1, 2];
+const VAR_REGISTER_ORDER = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+// const VAR_REGISTER_ORDER = [0, 1, 2];
 
 // Spilled values live at fixed stack addresses growing down from here
 const STACK_TOP = 511;
@@ -102,16 +102,31 @@ const COMPARE_JS: Record<string, (a: number, b: number) => boolean> = {
   ">=": (a, b) => a >= b, "<=": (a, b) => a <= b,
 };
 
-const EXPRESSION_TYPES = new Set(["Number", "Bool", "VariableName", "Parens", "UnaryOp", "BinaryOp"]);
+// Instructions that read a value and return it through their first operand
+const AGGREGATORS = new Set(["Average", "Sum", "Minimum", "Maximum"]);
+
+// Friendlier spellings for IC10 opcodes
+const OPCODE_ALIASES: Record<string, string> = {
+  loadSlot: "ls",
+  setSlot: "ss",
+};
+
+const EXPRESSION_TYPES = new Set([
+  "Number", "Bool", "VariableName", "Device", "DeviceProperty", "DeviceChannelProperty",
+  "DeviceNameProperty", "Parens", "UnaryOp", "BinaryOp", "FunctionCall", "String",
+]);
 const STATEMENT_TYPES = new Set([
   "Declaration", "Assignment", "IfExpr", "LoopExpr", "WhileExpr", "RepeatUntilExpr",
-  "break", "continue", "Instruction",
+  "break", "continue", "Instruction", "FunctionCall", "DeviceDeclaration", "Definition",
 ]);
 
 type VRegOperand = { kind: "vreg"; id: number };
 type ConstOperand = { kind: "const"; text: string };
 type NameOperand = { kind: "name"; text: string };
-type Operand = VRegOperand | ConstOperand | NameOperand;
+// Symbolic text emitted verbatim: device aliases, define names, HASH("..."),
+// game constants like DisplayMode.Seconds. Valid inline anywhere a number is.
+type SymOperand = { kind: "sym"; text: string };
+type Operand = VRegOperand | ConstOperand | NameOperand | SymOperand;
 
 type Inst =
   | { id: number; op: "alu"; opcode: string; dest: number; args: Operand[]; node: SyntaxNode }
@@ -120,7 +135,13 @@ type Inst =
   | { id: number; op: "storename"; name: string; src: Operand; node: SyntaxNode }
   | { id: number; op: "get"; dest: number; addr: number; node: SyntaxNode }
   | { id: number; op: "poke"; addr: number; src: Operand; node: SyntaxNode }
-  | { id: number; op: "raw"; opcode: string; args: Operand[]; node: SyntaxNode }
+  // A raw IC10 instruction (yield, sleep, l, s, ls, lb, user calls, ...).
+  // With a dest it is a pure value producer (dest is the first operand);
+  // without one it is a side effect and always survives.
+  | { id: number; op: "call"; opcode: string; dest: number | null; args: Operand[]; node: SyntaxNode }
+  // alias/define lines survive only if their name is used by kept code
+  | { id: number; op: "alias"; name: string; device: string; node: SyntaxNode }
+  | { id: number; op: "definedef"; name: string; value: string; node: SyntaxNode }
   | { id: number; op: "label"; name: string; node: SyntaxNode }
   | { id: number; op: "jump"; target: string; node: SyntaxNode }
   | { id: number; op: "branch"; opcode: string; args: Operand[]; target: string; node: SyntaxNode };
@@ -135,6 +156,14 @@ type VarState = {
   home: number | null;   // while inside an if/loop that assigns this variable,
                          // every write also lands in this vreg
 };
+
+/** Anything a name can refer to. */
+type Sym =
+  | { kind: "var"; state: VarState }
+  | { kind: "device"; pin: string }
+  // `text` is what uses emit: the define's own name when a `define` line is
+  // generated, or the substituted value for bare-identifier definitions
+  | { kind: "define"; text: string; needsLine: boolean };
 
 /** Metadata for one lowered if/elif/else, used by branch simplification. */
 type IfRegion = {
@@ -222,7 +251,7 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
   const boolVregs = new Set<number>(); // vregs known to hold 0/1
 
   // Innermost scope last; declarations die when their scope is popped
-  const scopes: Map<string, VarState>[] = [new Map()];
+  const scopes: Map<string, Sym>[] = [new Map()];
   // Targets for break/continue of the innermost enclosing loop
   const loopStack: { breakLabel: string; continueLabel: string }[] = [];
   // Placeholder name -> vreg already holding it in the current statement,
@@ -243,19 +272,26 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
     return complete;
   }
 
-  function lookup(name: string): VarState | null {
+  function lookup(name: string): Sym | null {
     for (let i = scopes.length - 1; i >= 0; i--) {
-      const state = scopes[i].get(name);
-      if (state) return state;
+      const symbol = scopes[i].get(name);
+      if (symbol) return symbol;
     }
     return null;
+  }
+
+  function lookupVar(name: string): VarState | null {
+    const symbol = lookup(name);
+    return symbol?.kind === "var" ? symbol.state : null;
   }
 
   /** Count how many variables currently share this vreg as their value. */
   function valueRefCount(id: number): number {
     let count = 0;
     for (const scope of scopes) {
-      for (const state of scope.values()) {
+      for (const symbol of scope.values()) {
+        if (symbol.kind !== "var") continue;
+        const state = symbol.state;
         if (state.value?.kind === "vreg" && state.value.id === id) count++;
       }
     }
@@ -279,7 +315,7 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
       case "Bool":
         return { kind: "const", text: node.text === "true" ? "1" : "0" };
       case "VariableName": {
-        const state = lookup(node.text);
+        const state = lookupVar(node.text);
         if (state && !state.maybe && state.value?.kind === "const") return state.value;
         return null;
       }
@@ -336,7 +372,19 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
     switch (node.type) {
       case "Number":
       case "Bool":
+      case "String":
+      case "Device":
         return 0;
+      case "DeviceProperty": {
+        const base = kids(node)[0];
+        // Game constants are inline; device reads occupy a register
+        if (base.type !== "Device" && !lookup(base.text)) return 0;
+        return 1;
+      }
+      case "DeviceChannelProperty":
+      case "DeviceNameProperty":
+      case "FunctionCall":
+        return 1;
       case "VariableName":
         // Placeholders must be loaded into a register; variables are free
         return lookup(node.text) ? 0 : 1;
@@ -395,19 +443,156 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
     return { kind: "vreg", id: dest };
   }
 
+  const sym = (text: string): Operand => ({ kind: "sym", text });
+
+  /** Pieces of a Device*Property node: base, property name, bracket index. */
+  function propertyParts(node: SyntaxNode) {
+    const parts = kids(node);
+    return {
+      base: parts[0],
+      prop: parts[parts.length - 1],
+      index: node.type === "DeviceProperty" ? null : parts[2],
+    };
+  }
+
+  type ResolvedBase =
+    | { kind: "device"; text: string }
+    | { kind: "define"; text: string }
+    | { kind: "unknown"; name: string };
+
+  /** What the base of a property access refers to. */
+  function resolveBase(base: SyntaxNode): ResolvedBase {
+    if (base.type === "Device") return { kind: "device", text: base.text };
+    const symbol = lookup(base.text);
+    if (symbol?.kind === "device") return { kind: "device", text: base.text };
+    if (symbol?.kind === "define") return { kind: "define", text: symbol.text };
+    if (symbol?.kind === "var") {
+      throw error(`${base.text} is a variable, not a device or define`, base);
+    }
+    return { kind: "unknown", name: base.text };
+  }
+
+  /**
+   * Function-call arguments: identifiers pass through verbatim (logic types,
+   * devices, defines — they are instruction operands, not values to load);
+   * strings name IC10 symbols directly; everything else compiles normally.
+   */
+  function compileCallArg(node: SyntaxNode): Operand {
+    if (node.type === "Device") return sym(node.text);
+    if (node.type === "String") return sym(node.text.slice(1, -1));
+    if (node.type === "VariableName") {
+      const symbol = lookup(node.text);
+      if (!symbol) return sym(node.text);
+      if (symbol.kind === "device") return sym(node.text);
+    }
+    return compileExpression(node);
+  }
+
+  /** The slot index of a device[...] access. */
+  function slotIndexOperand(index: SyntaxNode): Operand {
+    if (index.type === "Integer") return { kind: "const", text: index.text };
+    if (index.type === "String") throw error("Slot indexes must be numbers", index);
+    return compileCallArg(index);
+  }
+
+  /** The name filter of a deviceGroup[...] access, hashed when a string. */
+  function nameHashOperand(index: SyntaxNode): Operand {
+    if (index.type === "String") return sym(`HASH(${index.text})`);
+    return compileCallArg(index);
+  }
+
+  /**
+   * A function call maps directly onto an IC10 instruction: the name is the
+   * opcode and, when the result is used, the destination register is the
+   * first operand. Aggregators (Sum/Average/...) become batch reads.
+   */
+  function compileCall(node: SyntaxNode, wantValue: boolean): Operand | null {
+    const parts = kids(node);
+    const name = parts[0].text;
+    const argNodes = parts.filter(c => EXPRESSION_TYPES.has(c.type));
+
+    if (AGGREGATORS.has(name)) {
+      if (!wantValue) throw error(`${name}(...) must be assigned to something`, node);
+      const arg = argNodes.length === 1 ? argNodes[0] : null;
+      if (!arg || (arg.type !== "DeviceProperty" && arg.type !== "DeviceNameProperty")) {
+        throw error(`${name} expects one deviceHash.LogicType argument`, arg ?? node);
+      }
+      const { base, prop, index } = propertyParts(arg);
+      const resolved = resolveBase(base);
+      if (resolved.kind === "device") {
+        throw error(`${name} works on device groups, not single devices`, base);
+      }
+      const hash = resolved.kind === "define" ? sym(resolved.text) : sym(`HASH("${resolved.name}")`);
+      const dest = vreg();
+      if (arg.type === "DeviceProperty") {
+        emit({ op: "call", opcode: "lb", dest, args: [hash, sym(prop.text), sym(name)], node });
+      } else {
+        emit({ op: "call", opcode: "lbn", dest, args: [hash, nameHashOperand(index!), sym(prop.text), sym(name)], node });
+      }
+      return { kind: "vreg", id: dest };
+    }
+
+    const opcode = OPCODE_ALIASES[name] ?? name;
+    const args = argNodes.map(compileCallArg);
+    if (!wantValue) {
+      emit({ op: "call", opcode, dest: null, args, node });
+      return null;
+    }
+    const dest = vreg();
+    emit({ op: "call", opcode, dest, args, node });
+    return { kind: "vreg", id: dest };
+  }
+
   function compileExpression(node: SyntaxNode): Operand {
     switch (node.type) {
       case "Number":
         return constOp(parseFloat(node.text)) ?? { kind: "const", text: node.text };
       case "Bool":
         return { kind: "const", text: node.text === "true" ? "1" : "0" };
+      case "String":
+        // Strings are hashed; HASH("...") is resolved by the game
+        return sym(`HASH(${node.text})`);
+      case "Device":
+        throw error(`${node.text} is a device, not a value`, node);
+      case "DeviceProperty": {
+        const { base, prop } = propertyParts(node);
+        const resolved = resolveBase(base);
+        if (resolved.kind === "device") {
+          const dest = vreg();
+          emit({ op: "call", opcode: "l", dest, args: [sym(resolved.text), sym(prop.text)], node });
+          return { kind: "vreg", id: dest };
+        }
+        if (resolved.kind === "define") {
+          throw error("Reading from a device group needs an aggregator (Sum, Average, Minimum, Maximum)", node);
+        }
+        // Unknown identifiers: a game constant like DisplayMode.Seconds
+        return sym(`${resolved.name}.${prop.text}`);
+      }
+      case "DeviceChannelProperty":
+      case "DeviceNameProperty": {
+        const { base, prop, index } = propertyParts(node);
+        const resolved = resolveBase(base);
+        if (resolved.kind !== "device") {
+          throw error("Reading from a device group needs an aggregator (Sum, Average, Minimum, Maximum)", node);
+        }
+        const dest = vreg();
+        emit({ op: "call", opcode: "ls", dest, args: [sym(resolved.text), slotIndexOperand(index!), sym(prop.text)], node });
+        return { kind: "vreg", id: dest };
+      }
+      case "FunctionCall":
+        return compileCall(node, true)!;
       case "VariableName": {
         const name = node.text;
-        const state = lookup(name);
-        if (state) {
+        const symbol = lookup(name);
+        if (symbol?.kind === "var") {
+          const state = symbol.state;
           if (state.maybe) throw error(`${name} may be undefined`, node);
           if (!state.value) throw error(`${name} is used before being assigned`, node);
           return state.value;
+        }
+        if (symbol?.kind === "define") return { kind: "sym", text: symbol.text };
+        if (symbol?.kind === "device") {
+          throw error(`${name} is a device, not a value`, node);
         }
         // Placeholder read: must come into a register through a move
         const cached = statementLoads.get(name);
@@ -565,6 +750,8 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
   function setDest(inst: Inst, dest: number) {
     if (inst.op === "alu" || inst.op === "movev" || inst.op === "loadname" || inst.op === "get") {
       inst.dest = dest;
+    } else if (inst.op === "call" && inst.dest !== null) {
+      inst.dest = dest;
     }
   }
 
@@ -600,8 +787,9 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
   function collectAssignedNames(block: SyntaxNode[], out: Set<string>) {
     for (const statement of block) {
       if (statement.type === "Assignment") {
-        const nameNode = kids(statement).find(c => c.type === "VariableName");
-        if (nameNode) out.add(nameNode.text);
+        // Only plain variable targets; device writes need no merge handling
+        const target = kids(statement)[0];
+        if (target?.type === "VariableName") out.add(target.text);
       } else if (statement.type === "IfExpr") {
         for (const part of kids(statement)) {
           if (part.type === "If" || part.type === "ElseIf" || part.type === "Else") {
@@ -614,14 +802,50 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
     }
   }
 
-  /** The statement children of a construct (keywords and conditions filtered out). */
-  function blockOf(node: SyntaxNode): SyntaxNode[] {
-    return kids(node).filter(c => STATEMENT_TYPES.has(c.type));
+  /** Statement children between two keyword tokens (either side optional). */
+  function statementsIn(node: SyntaxNode, afterKw: string | null, beforeKw: string | null): SyntaxNode[] {
+    const parts = kids(node);
+    let start = 0;
+    let end = parts.length;
+    if (afterKw) {
+      const i = parts.findIndex(c => c.type === afterKw);
+      if (i >= 0) start = i + 1;
+    }
+    if (beforeKw) {
+      const i = parts.findIndex(c => c.type === beforeKw);
+      if (i >= 0) end = i;
+    }
+    return parts.slice(start, end).filter(c => STATEMENT_TYPES.has(c.type));
   }
 
-  /** The single expression child of a construct (while/until condition). */
+  /**
+   * The statement body of a construct. Function calls are both statements
+   * and expressions, so bodies are delimited by keywords, not by node type.
+   */
+  function blockOf(node: SyntaxNode): SyntaxNode[] {
+    switch (node.type) {
+      case "If":
+      case "ElseIf":
+        return statementsIn(node, "then", null);
+      case "WhileExpr":
+        return statementsIn(node, "do", null);
+      case "RepeatUntilExpr":
+        return statementsIn(node, "repeat", "until");
+      default: // Else, LoopExpr
+        return statementsIn(node, null, null);
+    }
+  }
+
+  /** The condition expression of an if/elif/while/repeat construct. */
   function conditionOf(node: SyntaxNode): SyntaxNode | null {
-    return kids(node).find(c => EXPRESSION_TYPES.has(c.type)) ?? null;
+    const parts = kids(node);
+    if (node.type === "RepeatUntilExpr") {
+      const i = parts.findIndex(c => c.type === "until");
+      return parts.slice(i + 1).find(c => EXPRESSION_TYPES.has(c.type)) ?? null;
+    }
+    const boundary = node.type === "WhileExpr" ? "do" : "then";
+    const i = parts.findIndex(c => c.type === boundary);
+    return parts.slice(0, i < 0 ? parts.length : i).find(c => EXPRESSION_TYPES.has(c.type)) ?? null;
   }
 
   function processBlockScoped(statements: SyntaxNode[]) {
@@ -647,8 +871,9 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
   function demoteVariables(names: Set<string>, node: SyntaxNode): Demoted[] {
     const demoted: Demoted[] = [];
     for (const name of names) {
-      const state = lookup(name);
-      if (!state) continue; // placeholder writes need no merge handling
+      const symbol = lookup(name);
+      if (symbol?.kind !== "var") continue; // placeholder writes need no merge handling
+      const state = symbol.state;
       const record: Demoted = {
         state,
         savedHome: state.home,
@@ -921,27 +1146,117 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
         if (lookup(nameNode.text)) {
           throw error(`${nameNode.text} was already defined`, nameNode);
         }
-        const initializer = parts.find(c => EXPRESSION_TYPES.has(c.type) && c !== nameNode);
+        const assignIdx = parts.findIndex(c => c.type === "Assign");
+        const initializer = assignIdx >= 0 ? parts[assignIdx + 1] : undefined;
         // The initializer is evaluated before the name is bound, so a
         // same-named reference is still an IC10 passthrough.
         const value = initializer ? compileExpression(initializer) : null;
-        scopes[scopes.length - 1].set(nameNode.text, { value, maybe: false, home: null });
+        scopes[scopes.length - 1].set(nameNode.text, { kind: "var", state: { value, maybe: false, home: null } });
         break;
       }
       case "Assignment": {
-        const nameNode = parts.find(c => c.type === "VariableName");
-        const expression = parts.find(c => EXPRESSION_TYPES.has(c.type) && c !== nameNode);
-        if (!nameNode || !expression) throw error("Malformed assignment", statement);
+        const target = parts[0];
+        const assignIdx = parts.findIndex(c => c.type === "Assign");
+        const expression = assignIdx >= 0 ? parts[assignIdx + 1] : undefined;
+        if (!target || !expression) throw error("Malformed assignment", statement);
         const value = compileExpression(expression);
-        const state = lookup(nameNode.text);
-        if (state) {
-          assignVariable(state, value, statement);
+
+        if (target.type === "VariableName") {
+          const symbol = lookup(target.text);
+          if (symbol && symbol.kind !== "var") {
+            throw error(`Cannot assign to ${target.text}`, target);
+          }
+          if (symbol) {
+            assignVariable(symbol.state, value, statement);
+          } else {
+            // Placeholder write: must leave the registers through a move
+            emit({ op: "storename", name: target.text, src: value, node: statement });
+          }
+          break;
+        }
+
+        // Device and device-group writes
+        const { base, prop, index } = propertyParts(target);
+        const resolved = resolveBase(base);
+        if (resolved.kind === "unknown") {
+          throw error(`Unknown device or define ${resolved.name}`, base);
+        }
+        if (target.type === "DeviceProperty") {
+          const opcode = resolved.kind === "device" ? "s" : "sb";
+          emit({ op: "call", opcode, dest: null, args: [sym(resolved.text), sym(prop.text), value], node: statement });
+        } else if (resolved.kind === "device") {
+          emit({
+            op: "call", opcode: "ss", dest: null,
+            args: [sym(resolved.text), slotIndexOperand(index!), sym(prop.text), value],
+            node: statement,
+          });
         } else {
-          // Placeholder write: must leave the registers through a move
-          emit({ op: "storename", name: nameNode.text, src: value, node: statement });
+          if (target.type === "DeviceChannelProperty") {
+            throw error("Device groups are selected by name, not slot", target);
+          }
+          emit({
+            op: "call", opcode: "sbn", dest: null,
+            args: [sym(resolved.text), nameHashOperand(index!), sym(prop.text), value],
+            node: statement,
+          });
         }
         break;
       }
+      case "DeviceDeclaration": {
+        const nameNode = parts.find(c => c.type === "VariableName");
+        const deviceNode = parts.find(c => c.type === "Device");
+        if (!nameNode || !deviceNode) throw error("Malformed device declaration", statement);
+        if (lookup(nameNode.text)) {
+          throw error(`${nameNode.text} was already defined`, nameNode);
+        }
+        scopes[scopes.length - 1].set(nameNode.text, { kind: "device", pin: deviceNode.text });
+        emit({ op: "alias", name: nameNode.text, device: deviceNode.text, node: statement });
+        break;
+      }
+      case "Definition": {
+        const nameNode = parts.find(c => c.type === "VariableName");
+        const assignIdx = parts.findIndex(c => c.type === "Assign");
+        const valueNode = assignIdx >= 0 ? parts[assignIdx + 1] : undefined;
+        if (!nameNode || !valueNode) throw error("Malformed definition", statement);
+        if (lookup(nameNode.text)) {
+          throw error(`${nameNode.text} was already defined`, nameNode);
+        }
+        const name = nameNode.text;
+        let symbol: Sym;
+        const folded = foldExpression(valueNode);
+        if (folded) {
+          // Numbers keep their name in the output via an IC10 define line
+          symbol = { kind: "define", text: name, needsLine: true };
+          emit({ op: "definedef", name, value: folded.text, node: statement });
+        } else if (valueNode.type === "String") {
+          symbol = { kind: "define", text: name, needsLine: true };
+          emit({ op: "definedef", name, value: `HASH(${valueNode.text})`, node: statement });
+        } else if (valueNode.type === "VariableName") {
+          const referenced = lookup(valueNode.text);
+          if (referenced?.kind === "define") {
+            symbol = { kind: "define", text: referenced.text, needsLine: false };
+          } else if (!referenced) {
+            // Bare identifier: substituted verbatim, no define line
+            symbol = { kind: "define", text: valueNode.text, needsLine: false };
+          } else {
+            throw error("define values must be constant", valueNode);
+          }
+        } else if (valueNode.type === "DeviceProperty") {
+          // Game constants like LogicType.Temperature substitute verbatim
+          const { base: constBase, prop: constProp } = propertyParts(valueNode);
+          if (constBase.type === "Device" || lookup(constBase.text)) {
+            throw error("define values must be constant", valueNode);
+          }
+          symbol = { kind: "define", text: `${constBase.text}.${constProp.text}`, needsLine: false };
+        } else {
+          throw error("define values must be constant", valueNode);
+        }
+        scopes[scopes.length - 1].set(name, symbol);
+        break;
+      }
+      case "FunctionCall":
+        compileCall(statement, false);
+        break;
       case "IfExpr":
         processIf(statement);
         break;
@@ -972,9 +1287,9 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
         if (statement.text.startsWith("sleep")) {
           if (!expression) throw error("sleep needs a duration", statement);
           const value = compileExpression(expression);
-          emit({ op: "raw", opcode: "sleep", args: [value], node: statement });
+          emit({ op: "call", opcode: "sleep", dest: null, args: [value], node: statement });
         } else {
-          emit({ op: "raw", opcode: "yield", args: [], node: statement });
+          emit({ op: "call", opcode: "yield", dest: null, args: [], node: statement });
         }
         break;
       }
@@ -1004,6 +1319,8 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
       case "loadname":
       case "get":
         return inst.dest;
+      case "call":
+        return inst.dest;
       default:
         return null;
     }
@@ -1013,7 +1330,7 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
     switch (inst.op) {
       case "alu":
       case "branch":
-      case "raw":
+      case "call":
         return inst.args;
       case "movev":
       case "storename":
@@ -1030,8 +1347,16 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
       .map(o => o.id);
   }
 
+  function symsOf(inst: Inst): string[] {
+    return operandsOf(inst)
+      .filter((o): o is SymOperand => o.kind === "sym")
+      .map(o => o.text);
+  }
+
   function hasSideEffect(inst: Inst): boolean {
-    return inst.op === "storename" || inst.op === "poke" || inst.op === "raw";
+    // Calls without a destination write devices, sleep, yield, ...
+    return inst.op === "storename" || inst.op === "poke" ||
+      (inst.op === "call" && inst.dest === null);
   }
 
   function setsEqual(a: Set<number>, b: Set<number>): boolean {
@@ -1090,30 +1415,41 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
   function eliminateDeadCode(program: Inst[]): Inst[] {
     const liveAtLabel = convergeLiveness(program);
     let live = new Set<number>();
+    // Symbol names (aliases, defines) referenced by kept instructions;
+    // walking backward sees every use before its alias/define line.
+    const usedSyms = new Set<string>();
     const kept: Inst[] = [];
+    const keep = (inst: Inst) => {
+      for (const s of symsOf(inst)) usedSyms.add(s);
+      kept.push(inst);
+    };
     for (let i = program.length - 1; i >= 0; i--) {
       const inst = program[i];
       switch (inst.op) {
         case "label":
           live = new Set(liveAtLabel.get(inst.name) ?? []);
-          kept.push(inst);
+          keep(inst);
           continue;
         case "jump":
           live = new Set(liveAtLabel.get(inst.target) ?? []);
-          kept.push(inst);
+          keep(inst);
           continue;
         case "branch": {
           for (const v of liveAtLabel.get(inst.target) ?? []) live.add(v);
           for (const used of usesOf(inst)) live.add(used);
-          kept.push(inst);
+          keep(inst);
           continue;
         }
+        case "alias":
+        case "definedef":
+          if (usedSyms.has(inst.name)) keep(inst);
+          continue;
       }
       const dest = destOf(inst);
       if (!hasSideEffect(inst) && (dest === null || !live.has(dest))) continue;
       if (dest !== null) live.delete(dest);
       for (const used of usesOf(inst)) live.add(used);
-      kept.push(inst);
+      keep(inst);
     }
     return kept.reverse();
   }
@@ -1352,7 +1688,8 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
       for (let j = i - 1; j >= 0; j--) {
         const other = result[j];
         const barrier =
-          other.op === "storename" || other.op === "loadname" || other.op === "raw" ||
+          other.op === "storename" || other.op === "loadname" || other.op === "call" ||
+          other.op === "alias" || other.op === "definedef" ||
           other.op === "poke" || other.op === "get" ||
           other.op === "label" || other.op === "jump" || other.op === "branch" ||
           destOf(other) === value;
@@ -1432,7 +1769,12 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
               case "storename": return `move ${inst.name} ${fmt(inst.src)}`;
               case "get": return `get r${regOf.get(inst.dest)} db ${inst.addr}`;
               case "poke": return `poke ${inst.addr} ${fmt(inst.src)}`;
-              case "raw": return [inst.opcode, ...inst.args.map(fmt)].join(" ");
+              case "call":
+                return inst.dest === null
+                  ? [inst.opcode, ...inst.args.map(fmt)].join(" ")
+                  : [inst.opcode, `r${regOf.get(inst.dest)}`, ...inst.args.map(fmt)].join(" ");
+              case "alias": return `alias ${inst.name} ${inst.device}`;
+              case "definedef": return `define ${inst.name} ${inst.value}`;
               case "label": return `${inst.name}:`;
               case "jump": return `j ${inst.target}`;
               case "branch": return `${inst.opcode} ${inst.args.map(fmt).join(" ")} ${inst.target}`;
@@ -1473,7 +1815,7 @@ export function compile(ast: SyntaxNode, registerOrder: number[] = VAR_REGISTER_
           switch (inst.op) {
             case "alu":
             case "branch":
-            case "raw":
+            case "call":
               rewritten.push({ ...inst, args: inst.args.map(replace) });
               break;
             case "movev":

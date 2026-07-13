@@ -560,6 +560,38 @@ const cases = {
       "move d r0",
     ]
   },
+  "stack allocation in loops (not enough registers + equal uses)": {
+    source: [
+      "let x0 = y0",
+      "let x1 = y1",
+      "let x2 = y2",
+      "loop",
+      "  z01 = x0 + x1",
+      "  z02 = x0 + x2",
+      "  z12 = x1 + x2",
+      "end",
+    ],
+    // The minimum number of virtual registers is 4.
+    // At least one temporary register is needed.
+    expected: [
+      "move r0 y0",
+      "move r1 y1",
+      "move r2 y2",
+      "poke 511 r2", // r2 is the chosen temporary
+      "loop0:",
+      "add r2 r0 r1",
+      // "poke 510 r2", // Redundant instructions
+      // "get r2 db 510",
+      "move z01 r2",
+      "get r2 db 511",
+      "add r2 r0 r2",
+      "move z02 r2",
+      "get r2 db 511",
+      "add r2 r1 r2",
+      "move z12 r2",
+      "j loop0"
+    ]
+  },
   "stack allocation in loops (not enough registers + optimizing order)": {
     // Assigning placeholders early to free registers.
     // This is only possible because order doesn't matter for the calculation of x4
@@ -794,6 +826,136 @@ const cases = {
       "move a r0",
       "j repeat0",
     ],
+  },
+  // Devices, defines and function calls
+  "device declarations and dot access": {
+    source: [
+      "device pump = d0",
+      "pump.Setting = 1",
+      "let x = pump.On",
+      "d1.Setting = x", // Raw device pins work directly
+    ],
+    expected: [
+      "alias pump d0",
+      "s pump Setting 1",
+      "l r0 pump On",
+      "s d1 Setting r0",
+    ],
+  },
+  "slot access with brackets": {
+    source: [
+      "device larre = d0",
+      "device sorter = d1",
+      "let count = larre[255].Quantity",
+      "sorter[0].PrefabHash = \"Iron\"",
+      "b = count",
+    ],
+    expected: [
+      "alias larre d0",
+      "alias sorter d1",
+      "ls r0 larre 255 Quantity",
+      "ss sorter 0 PrefabHash HASH(\"Iron\")",
+      "move b r0",
+    ],
+  },
+  "unused devices and dead reads are dropped": {
+    source: [
+      "device pump = d0",
+      "device spare = d1",
+      "let x = pump.On",
+      "b = 1",
+    ],
+    expected: "move b 1", // No alias lines survive
+  },
+  "defines emit only when used": {
+    source: [
+      "define light = \"StructureWallLight\"",
+      "define unused = 5",
+      "define y = 100",
+      "light.On = y",
+    ],
+    expected: [
+      "define light HASH(\"StructureWallLight\")",
+      "define y 100",
+      "sb light On y",
+    ],
+  },
+  "bare identifier defines substitute without a define line": {
+    source: [
+      "define str = HelloWorld",
+      "let s = str",
+      "c = s",
+    ],
+    expected: "move c HelloWorld",
+  },
+  "aggregators read device groups": {
+    source: [
+      "define light = \"StructureWallLight\"",
+      "let x = Sum(light.On)",
+      "let y = Average(deviceHash.Temperature)", // Unknown names hash directly
+      "b = x + y",
+    ],
+    expected: [
+      "define light HASH(\"StructureWallLight\")",
+      "lb r0 light On Sum",
+      "lb r1 HASH(\"deviceHash\") Temperature Average",
+      "add r0 r0 r1",
+      "move b r0",
+    ],
+  },
+  "named device groups use lbn and sbn": {
+    source: [
+      "define light = \"StructureWallLight\"",
+      "let x = Sum(light[\"Inside\"].On)",
+      "light[\"Inside\"].On = true",
+      "b = x",
+    ],
+    expected: [
+      "define light HASH(\"StructureWallLight\")",
+      "lbn r0 light HASH(\"Inside\") On Sum",
+      "sbn light HASH(\"Inside\") On 1",
+      "move b r0",
+    ],
+  },
+  "function calls become instructions": {
+    source: [
+      "device larre = d0",
+      "let itemCount = ls(larre, 0, Quantity)", // Assigned: first operand is the output
+      "b = itemCount",
+      "s(db, Setting, 5)", // Statement: translated as-is
+    ],
+    expected: [
+      "alias larre d0",
+      "ls r0 larre 0 Quantity",
+      "move b r0",
+      "s db Setting 5",
+    ],
+  },
+  "loadSlot and setSlot are aliases": {
+    source: [
+      "let y = loadSlot(d0, 0, Quantity)",
+      "setSlot(d1, 0, PrefabHash, y)",
+    ],
+    expected: [
+      "ls r0 d0 0 Quantity",
+      "ss d1 0 PrefabHash r0",
+    ],
+  },
+  "strings hash and propagate like constants": {
+    source: "let s = \"Hello World!\"\nc = s",
+    expected: "move c HASH(\"Hello World!\")",
+  },
+  "game constants stay inline": {
+    source: "let x = DisplayMode.Seconds\nsleep x",
+    expected: "sleep DisplayMode.Seconds",
+  },
+  "device group reads need an aggregator": {
+    source: "define light = \"X\"\nb = light.On",
+    error: "Line 1: Reading from a device group needs an aggregator (Sum, Average, Minimum, Maximum)",
+  },
+  "writing to unknown devices is an error": {
+    source: "foo.On = 1",
+    error: "Line 0: Unknown device or define foo",
   }
 };
 

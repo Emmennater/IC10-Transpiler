@@ -38,18 +38,20 @@ Instruction { kw_<"yield"> | kw_<"sleep"> expression }
 
 FunctionCall { FunctionName !call ParenLeft expression (Comma expression)* ParenRight }
 
-expression { Number | Bool | VariableName | DeviceProperty | DeviceChannelProperty |
+expression { Number | Bool | VariableName | Device | DeviceProperty | DeviceChannelProperty |
   DeviceNameProperty | Parens | UnaryOp | BinaryOp | FunctionCall | String }
 
 VariableName { identifier }
 
 FunctionName { identifier }
 
-DeviceProperty { VariableName Dot VariableName }
+deviceBase { VariableName | Device }
 
-DeviceChannelProperty { VariableName BracketLeft Integer BracketRight Dot VariableName }
+DeviceProperty { deviceBase Dot VariableName }
 
-DeviceNameProperty { VariableName BracketLeft (String | VariableName) BracketRight Dot VariableName }
+DeviceChannelProperty { deviceBase BracketLeft Integer BracketRight Dot VariableName }
+
+DeviceNameProperty { deviceBase BracketLeft (String | VariableName) BracketRight Dot VariableName }
 
 Parens { ParenLeft expression ParenRight }
 

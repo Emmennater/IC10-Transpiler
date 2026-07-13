@@ -8,9 +8,14 @@ block { newline* statement (newline+ statement)* newline* }
 
 statement { Instruction | Label | FunctionCall }
 
-expression { VariableName | Number | String | FunctionCall | Device | Register }
+expression { VariableName | Number | String | FunctionCall | Device |
+  DeviceProperty | Register }
 
 VariableName { identifier }
+
+deviceBase { VariableName | DeviceName }
+
+DeviceProperty { deviceBase Dot VariableName }
 
 LabelName { identifier }
 
@@ -42,6 +47,7 @@ Register {
   Number { @digit+ ("." | "." @digit+)? }
   Integer { @digit+ }
   Colon { ":" }
+  Dot { "." }
   newline { "\n" }
   String { '"' (!["\\] | "\\" _)* '"' }
   Comment { "#" ![\n]* }
