@@ -44,6 +44,10 @@ h1 {
   color: #ff6b6b;
 }
 
+#saved-icon {
+  color: #b7b9ba;
+}
+
 .script-controls {
   right: 8px;
   display: flex;

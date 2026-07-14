@@ -8,6 +8,7 @@ import { LRLanguage, HighlightStyle, syntaxHighlighting, indentUnit } from "@cod
 import { styleTags, tags as t, Tag } from "@lezer/highlight";
 import { parser } from "./parser.js";
 import { parser as parser_ic10 } from "./parser_ic10.js";
+import { saveScript, documentChanged } from "./save-load.js";
 
 const initialText = `
 let x = a + b
@@ -274,10 +275,17 @@ const keymapExtensions = [
     {
       key: "Mod-Enter",
       run: () => { runCallback(); return true; }
+    },
+    {
+      key: "Mod-s",
+      run: () => {
+        saveScript();
+        return true;
+      }
     }
   ]),
   EditorView.updateListener.of(update => {
-    if (update.docChanged) runCallback();
+    if (update.docChanged) documentChanged();
   }),
   EditorView.updateListener.of(update => {
     // Only act when the selection actually changed in this update.

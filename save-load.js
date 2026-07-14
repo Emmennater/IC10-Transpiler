@@ -42,6 +42,22 @@ function setCurrentScript(name) {
   refreshScriptList();
 }
 
+export function documentChanged() {
+  const savedIcon = document.querySelector("#saved-icon");
+  savedIcon.innerHTML = currentScript ? "✖" : "";
+}
+
+export function saveScript() {
+  const name = currentScript || (window.prompt("Save script as:") ?? "").trim();
+  if (!name) return;
+  const scripts = readScripts();
+  scripts[name] = editor.state.doc.toString();
+  writeScripts(scripts);
+  setCurrentScript(name);
+  const savedIcon = document.querySelector("#saved-icon");
+  savedIcon.innerHTML = "✔";
+}
+
 document.querySelector("#script-rename").addEventListener("click", () => {
   if (!currentScript) return;
   const name = window.prompt("Rename script to:") ?? "";
@@ -53,14 +69,7 @@ document.querySelector("#script-rename").addEventListener("click", () => {
   setCurrentScript(name);
 });
 
-document.querySelector("#script-save").addEventListener("click", () => {
-  const name = currentScript || (window.prompt("Save script as:") ?? "").trim();
-  if (!name) return;
-  const scripts = readScripts();
-  scripts[name] = editor.state.doc.toString();
-  writeScripts(scripts);
-  setCurrentScript(name);
-});
+document.querySelector("#script-save").addEventListener("click", saveScript);
 
 document.querySelector("#script-new").addEventListener("click", () => {
   updateTextEditor(editor, "");
@@ -69,6 +78,7 @@ document.querySelector("#script-new").addEventListener("click", () => {
 
 document.querySelector("#script-delete").addEventListener("click", () => {
   if (!currentScript) return;
+  if (!window.confirm(`Delete "${currentScript}"?`)) return;
   const scripts = readScripts();
   delete scripts[currentScript];
   writeScripts(scripts);
@@ -99,7 +109,12 @@ export function setup(run) {
     currentScript = "";
   }
 
+  document.querySelector("#script-run").addEventListener("click", run);
+
   refreshScriptList();
   setRunCallback(run);
   run();
+
+  const savedIcon = document.querySelector("#saved-icon");
+  savedIcon.innerHTML = "✔";
 }
